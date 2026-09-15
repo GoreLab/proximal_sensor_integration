@@ -1,0 +1,80 @@
+---
+title: "get_msi_md"
+output: pdf_document
+date: "2024-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis/get_labels/msi_labels")
+```
+
+
+#Import libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+```
+
+
+#Import files
+```{r}
+#Get file names
+filenames <- read.csv('msi_filenames_NYH2_NYH3_2020-24.csv')
+
+#Get G2F field information
+md2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+md2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+md2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+md2023 = read.csv("G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+md2024 = read.csv("G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter
+md2020 <- md2020[md2020$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range")]
+md2021 <- md2021[md2021$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range")]
+md2022 <- md2022[md2022$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range")]
+md2023 <- md2023[md2023$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range")]
+md2024 <- md2024[md2024$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range")]
+
+md_all <- rbind(md2020, md2021, md2022, md2023, md2024)
+
+colnames(md_all) <- c("year", "field", "plot", "column", "range")
+md_all$column <- as.integer(md_all$column)
+md_all$plot <- as.integer(md_all$plot)
+```
+
+
+#Get MSI md
+```{r}
+#Add year
+filenames$year <- NA
+for (i in 1:nrow(filenames)){
+  Image <- str_split_1(filenames[i, 'file_name'], pattern = '_')
+  StringDate <- Image[2]
+  ImageDate <- as.Date(StringDate, '%m%d%Y')
+  filenames[i, 'year'] <- as.numeric(format(ImageDate, "%Y"))
+}
+
+#Add column & range to filenames
+md <- filenames %>% 
+  left_join(md_all, by = join_by(year, field, plot))
+```
+
+
+#Look at data
+```{r}
+table(md$date)
+```
+
+
+#Save files
+```{r}
+write.csv(md, file = 'msi_md_NYH2_NYH3_2020-24.csv', quote = FALSE)
+```
+
+

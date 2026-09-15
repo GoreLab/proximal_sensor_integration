@@ -1,0 +1,110 @@
+---
+title: "get_msi_labels"
+output: pdf_document
+date: "2024-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis/get_labels/msi_labels")
+```
+
+
+#Import libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(readxl)
+```
+
+
+#Import files
+```{r}
+#Get metadata
+md <- read.csv('msi_md_NYH2_NYH3_2020-24.csv')
+
+#Get GDD
+gdd <- read.csv('gdd_2020-24.csv')
+
+#Get G2F information
+labels2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+labels2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+labels2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+labels2023 = read.csv("G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+labels2024 = read.csv("G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter to NYH2 & NYH3
+labels2020 <- labels2020[labels2020$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2021 <- labels2021[labels2021$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2022 <- labels2022[labels2022$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2023 <- labels2023[labels2023$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2024 <- labels2024[labels2024$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+
+#Create single df
+labels2020$`Date Plot Planted [MM/DD/YY]` <- as.Date(labels2020$`Date Plot Planted [MM/DD/YY]`[1], '%m/%d/%Y')
+labels2022$Source <- NA
+labels2023 <- labels2023[,-c(1)]
+labels2024 <- labels2024[,-c(1)]
+labels_all <- rbind(labels2020, labels2021, labels2022, labels2023, labels2024)
+
+#Rename columns
+colnames(labels_all)[colnames(labels_all)=='Plot'] <- 'plot'
+colnames(labels_all)[colnames(labels_all)=='Range'] <- 'range'
+colnames(labels_all)[colnames(labels_all)=='Pass'] <- 'column'
+colnames(labels_all)[colnames(labels_all)=='Anthesis [days]'] <- 'anthesis_days'
+colnames(labels_all)[colnames(labels_all)=='Silking [days]'] <- 'silking_days'
+colnames(labels_all)[colnames(labels_all)=='Plant Height [cm]'] <- 'plant_height'
+colnames(labels_all)[colnames(labels_all)=='Ear Height [cm]'] <- 'ear_height'
+colnames(labels_all)[colnames(labels_all)=='Stand Count [# of plants]'] <- 'stand_count'
+colnames(labels_all)[colnames(labels_all)=='Root Lodging [# of plants]'] <- 'root_lodging'
+colnames(labels_all)[colnames(labels_all)=='Stalk Lodging [# of plants]'] <- 'stalk_lodging'
+colnames(labels_all)[colnames(labels_all)=='Grain Moisture [%]'] <- 'grain_moisture'
+colnames(labels_all)[colnames(labels_all)=='Test Weight [lbs]'] <- 'test_weight'
+colnames(labels_all)[colnames(labels_all)=='Plot Weight [lbs]'] <- 'plot_weight'
+colnames(labels_all)[colnames(labels_all)=='Grain Yield (bu/A)'] <- 'grain_yield'
+colnames(labels_all)[colnames(labels_all)=='Year'] <- 'year'
+colnames(labels_all)[colnames(labels_all)=='Field-Location'] <- 'field'
+labels_all <- as.data.frame(labels_all)
+labels_all$plot <- as.integer(labels_all$plot)
+labels_all$column <- as.integer(labels_all$column)
+
+#Add ASI
+labels_all$ASI <- labels_all$silking_days - labels_all$anthesis_days
+```
+
+
+#Add phenotypes to md
+```{r}
+labels_all <- md[,c('file_name', 'date', 'field', 'year', 'plot')] %>% 
+  left_join(labels_all, by = join_by(field, year, plot))
+```
+
+
+#Add days after planting and growing degree days
+```{r}
+labels_all$DAP <- NA
+for (i in 1:nrow(labels_all)){
+  PlantingDate <- as.Date(labels_all$`Date Plot Planted [MM/DD/YY]`[i], '%Y-%m-%d')
+  StringDate = as.character(str_split(labels_all$file_name[i], "_")[[1]][2])
+  ImageDate = as.Date(StringDate, '%m%d%Y')
+  labels_all[i, 'date'] <- format(ImageDate, '%Y-%m-%d')
+  DAP = ImageDate - PlantingDate
+  labels_all[i, 'DAP'] <- DAP
+}
+
+#Add GDD
+labels_all <- labels_all %>% 
+  left_join(gdd[,c('date', 'cumulative_gdd')], by = join_by(date))
+```
+
+
+```{r}
+write.csv(labels_all, file = 'msi_labels_NYH2_NYH3_2020-24.csv', quote = FALSE)
+```
+
+

@@ -1,0 +1,104 @@
+---
+title: "Train/Test Split"
+output: html_document
+date: "2024-05-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis/get_labels")
+```
+
+
+#Import libraries
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyverse)
+```
+
+
+#Import files
+```{r}
+labels_lidar <- read.csv("lidar_labels/lidar_labels_NYH2_NYH3_2020-24.csv")
+labels_msi <- read.csv("msi_labels/msi_labels_NYH2_NYH3_2020-24.csv")
+
+#Get G2F information
+labels2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+labels2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+labels2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+labels2023 = read.csv("G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+labels2024 = read.csv("G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter to NYH2 & NYH3
+labels2020 <- labels2020[labels2020$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2021 <- labels2021[labels2021$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2022 <- labels2022[labels2022$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2023 <- labels2023[labels2023$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2024 <- labels2024[labels2024$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+
+#Create single df; leave out 2024 as test set
+labels2020$`Date Plot Planted [MM/DD/YY]` <- as.Date(labels2020$`Date Plot Planted [MM/DD/YY]`[1], '%m/%d/%Y')
+labels2022$Source <- NA
+labels2023 <- labels2023[,-c(1)]
+labels2024 <- labels2024[,-c(1)]
+labels_G2F <- rbind(labels2020, labels2021, labels2022, labels2023)
+
+#Add uniqueID
+labels_lidar <- labels_lidar %>% unite("uniqueID", c("field", "year", "plot"), sep = "_", remove = FALSE, na.rm = FALSE)
+labels_msi <- labels_msi %>% unite("uniqueID", c("field", "year", "plot"), sep = "_", remove = FALSE, na.rm = FALSE)
+labels_G2F <- labels_G2F %>% unite("uniqueID", c("Field-Location", "Year", "Plot"), sep = "_", remove = FALSE, na.rm = FALSE)
+```
+
+
+#LO1Y - Assignment of years to train/val split for autoencoder
+```{r}
+#Add test to 2024 MSI and lidar labels
+labels_lidar[labels_lidar$year == 2024, 'train_set'] = 'test'
+labels_msi[labels_msi$year == 2024, 'train_set'] = 'test'
+
+#train is 2020-22, val is 2023
+labels_lidar[labels_lidar$year == 2020 | labels_lidar$year == 2021 | labels_lidar$year == 2022, 'train_set'] = 'train'
+labels_lidar[labels_lidar$year == 2023, 'train_set'] = 'val'
+labels_msi[labels_msi$year == 2020 | labels_msi$year == 2021 | labels_msi$year == 2022, 'train_set'] = 'train'
+labels_msi[labels_msi$year == 2023, 'train_set'] = 'val'
+
+#Save files
+write.csv(labels_lidar, file = 'lidar_labels_NYH2_NYH3_2020-24_LO1Yv3.csv', quote = FALSE)
+write.csv(labels_msi, file = 'msi_labels_NYH2_NYH3_2020-24_LO1Yv3.csv', quote = FALSE)
+
+#train is 2020-21 & 2023, val is 2022
+labels_lidar[labels_lidar$year == 2020 | labels_lidar$year == 2021 | labels_lidar$year == 2023, 'train_set'] = 'train'
+labels_lidar[labels_lidar$year == 2022, 'train_set'] = 'val'
+labels_msi[labels_msi$year == 2020 | labels_msi$year == 2021 | labels_msi$year == 2023, 'train_set'] = 'train'
+labels_msi[labels_msi$year == 2022, 'train_set'] = 'val'
+
+#Save files
+write.csv(labels_lidar, file = 'lidar_labels_NYH2_NYH3_2020-24_LO1Yv2.csv', quote = FALSE)
+write.csv(labels_msi, file = 'msi_labels_NYH2_NYH3_2020-24_LO1Yv2.csv', quote = FALSE)
+
+#train is 2020 & 2022-23, val is 2021
+labels_lidar[labels_lidar$year == 2020 | labels_lidar$year == 2022 | labels_lidar$year == 2023, 'train_set'] = 'train'
+labels_lidar[labels_lidar$year == 2021, 'train_set'] = 'val'
+labels_msi[labels_msi$year == 2020 | labels_msi$year == 2022 | labels_msi$year == 2023, 'train_set'] = 'train'
+labels_msi[labels_msi$year == 2021, 'train_set'] = 'val'
+
+#Save files
+write.csv(labels_lidar, file = 'lidar_labels_NYH2_NYH3_2020-24_LO1Yv1.csv', quote = FALSE)
+write.csv(labels_msi, file = 'msi_labels_NYH2_NYH3_2020-24_LO1Yv1.csv', quote = FALSE)
+
+#train is 2021-23, val is 2020
+labels_lidar[labels_lidar$year == 2021 | labels_lidar$year == 2022 | labels_lidar$year == 2023, 'train_set'] = 'train'
+labels_lidar[labels_lidar$year == 2020, 'train_set'] = 'val'
+labels_msi[labels_msi$year == 2021 | labels_msi$year == 2022 | labels_msi$year == 2023, 'train_set'] = 'train'
+labels_msi[labels_msi$year == 2020, 'train_set'] = 'val'
+
+#Save files
+write.csv(labels_lidar, file = 'lidar_labels_NYH2_NYH3_2020-24_LO1Yv0.csv', quote = FALSE)
+write.csv(labels_msi, file = 'msi_labels_NYH2_NYH3_2020-24_LO1Yv0.csv', quote = FALSE)
+```
+

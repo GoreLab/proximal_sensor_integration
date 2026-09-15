@@ -1,0 +1,139 @@
+---
+title: "get_lsp_dfs"
+output: html_document
+date: "2025-01-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis")
+```
+
+
+#Load libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+```
+
+
+#Read in data
+```{r}
+labels_lidar <- read.csv('get_labels/lidar_labels_NYH2_NYH3_2020-24_Test.csv')
+z_lidar <- read.csv('LSP_files/CV_Experiments/Test_z/z_lidar_Test_512.csv', header = FALSE, sep = ",")
+
+labels_msi <- read.csv('get_labels/msi_labels_NYH2_NYH3_2020-24_Test.csv')
+z_msi <- read.csv('LSP_files/CV_Experiments/Test_z/z_msi_Test_512.csv', header = FALSE, sep = ",")
+
+labels_VI <- read.csv('VI_labels/labels_VI_NYH2_NYH3_2020-24.csv')
+```
+
+
+#Add VI labels
+```{r}
+#Add VIs
+labels_msi <- labels_msi %>% 
+  left_join(labels_VI, by = join_by(file_name))
+```
+
+
+#Create datasets of labels and latent codes
+```{r}
+df_lidar <- cbind(labels_lidar, z_lidar)
+df_msi <- cbind(labels_msi, z_msi)
+```
+
+
+#Save files
+```{r}
+write.csv(df_lidar, "LSP_files/CV_Experiments/Test_labels/labels_z_lidar_NYH2_NYH3_2020-24_Test_512.csv")
+write.csv(df_msi, "LSP_files/CV_Experiments/Test_labels/labels_z_msi_NYH2_NYH3_2020-24_Test_512.csv")
+```
+
+
+#Create timeseries datasets
+```{r}
+#Check unique GDD
+GDD_unique_lidar <- df_lidar[,c('year', 'cumulative_gdd', 'date')] %>%
+  distinct(year, date, cumulative_gdd, .keep_all = TRUE) %>%   # keep unique rows
+  group_by(year) %>%
+  arrange(cumulative_gdd, .by_group = TRUE)
+
+GDD_unique_msi <- df_msi[,c('year', 'cumulative_gdd', 'date')] %>%
+  distinct(year, date, cumulative_gdd, .keep_all = TRUE) %>%   # keep unique rows
+  group_by(year) %>%
+  arrange(cumulative_gdd, .by_group = TRUE)
+
+#Create equivalencies across all 5 years
+df_lidar$GDD_equiv <- NA
+for(i in 1:nrow(df_lidar)){
+  if(df_lidar$cumulative_gdd[i] >= 678 & df_lidar$cumulative_gdd[i] <= 792){
+    df_lidar$GDD_equiv[i] = '679-791'
+  }
+  if(df_lidar$cumulative_gdd[i] >= 882 & df_lidar$cumulative_gdd[i] <= 1009){
+    df_lidar$GDD_equiv[i] = '883-1008'
+  }
+  if(df_lidar$cumulative_gdd[i] >= 1266 & df_lidar$cumulative_gdd[i] <= 1406){
+    df_lidar$GDD_equiv[i] = '1267-1405'
+  }
+  #if(df_lidar$cumulative_gdd[i] >= 1306 & df_lidar$cumulative_gdd[i] <= 1406){
+  #  df_lidar$GDD_equiv[i] = '1307-1405'
+  #}
+  if(df_lidar$cumulative_gdd[i] >= 2531 & df_lidar$cumulative_gdd[i] <= 2627){
+    df_lidar$GDD_equiv[i] = '2533-2626'
+  }
+}
+
+df_msi$GDD_equiv <- NA
+for(i in 1:nrow(df_msi)){
+  if(df_msi$cumulative_gdd[i] >= 541 & df_msi$cumulative_gdd[i] <= 598){
+    df_msi$GDD_equiv[i] = '542-597'
+  }
+  if(df_msi$cumulative_gdd[i] >= 714 & df_msi$cumulative_gdd[i] <= 911){
+    df_msi$GDD_equiv[i] = '715-910'
+  }
+  if(df_msi$cumulative_gdd[i] >= 1007 & df_msi$cumulative_gdd[i] <= 1175){
+    df_msi$GDD_equiv[i] = '1008-1174'
+  }
+  if(df_msi$cumulative_gdd[i] >= 1942 & df_msi$cumulative_gdd[i] <= 2036){
+    df_msi$GDD_equiv[i] = '1943-2035'
+  }
+  if(df_msi$cumulative_gdd[i] >= 2287 & df_msi$cumulative_gdd[i] <= 2478){
+    df_msi$GDD_equiv[i] = '2288-2477'
+  }
+}
+
+#Remove excess data
+df_lidar <- df_lidar[!is.na(df_lidar$GDD_equiv),]
+df_lidar <- df_lidar[!(df_lidar$date == "2022-07-06"),]
+df_lidar <- df_lidar[!(df_lidar$date == "2021-08-03"),]
+df_lidar <- df_lidar[!(df_lidar$date == "2021-08-04"),]
+
+df_msi <- df_msi[!is.na(df_msi$GDD_equiv),]
+df_msi <- df_msi[!(df_msi$date == "2020-07-18"),]
+df_msi <- df_msi[!(df_msi$date == "2020-09-09"),]
+df_msi <- df_msi[!(df_msi$date == "2021-07-15"),]
+df_msi <- df_msi[!(df_msi$date == "2021-09-20"),]
+df_msi <- df_msi[!(df_msi$date == "2022-07-06"),]
+df_msi <- df_msi[!(df_msi$date == "2022-09-20"),]
+
+#Reformat
+df_lidar <- df_lidar[,-c(1:2)]
+df_lidar <- df_lidar %>% relocate(GDD_equiv)
+
+df_msi <- df_msi[,-c(1:2)]
+df_msi <- df_msi %>% relocate(GDD_equiv)
+```
+
+
+#Save files
+```{r}
+write.csv(df_lidar, "LSP_files/CV_Experiments/Test_labels_equiv/labels_z_lidar_NYH2_NYH3_2020-24_Test_512_equiv.csv")
+write.csv(df_msi, "LSP_files/CV_Experiments/Test_labels_equiv/labels_z_msi_NYH2_NYH3_2020-24_Test_512_equiv.csv")
+```
+
