@@ -1,0 +1,493 @@
+---
+title: "Quality Checks"
+output: html_document
+date: "2025-06-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis")
+```
+
+
+#Load libraries
+```{r}
+library(sommer)
+library(psych)
+library(ggplot2)
+library(stringr)
+library(tidyverse)
+library(caTools)
+library(ggfortify)
+library(dplyr)
+library(Metrics)
+```
+
+
+#Read in data
+```{r}
+labels_VI <- read.csv('VI_labels/labels_VI_NYH2_NYH3_2020-24.csv')
+pixel_stats <- read.csv('pixel_stats_NYH2_NYH3_2020-24.csv')
+
+labels_ES_2020 <- read.csv('get_labels/lidar_labels/Plotsplits_2020_unnested_height.csv')
+labels_ES <- read.csv('get_labels/lidar_labels/Plotsplits_NYH2_NYH3_2020-24.csv')
+bad_pc <- read.csv('bad_pc_fnames_2020-24.csv')
+density_stats <- read.csv('density_stats_NYH2_NYH3_2020-24.csv')
+
+#Get G2F field information
+md2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+md2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+md2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+md2023 = read.csv("get_labels/G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+md2024 = read.csv("get_labels/G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter
+md2020 <- md2020[md2020$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range", "Pedigree", "Replicate", "Block", "Plant Height [cm]")]
+md2021 <- md2021[md2021$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range", "Pedigree", "Replicate", "Block", "Plant Height [cm]")]
+md2022 <- md2022[md2022$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range", "Pedigree", "Replicate", "Block", "Plant Height [cm]")]
+md2023 <- md2023[md2023$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range", "Pedigree", "Replicate", "Block", "Plant Height [cm]")]
+md2024 <- md2024[md2024$`Field-Location` %in% c('NYH2', 'NYH3'), c("Year", "Field-Location","Plot", "Pass", "Range", "Pedigree", "Replicate", "Block", "Plant Height [cm]")]
+
+#Create single df
+md_all <- rbind(md2020, md2021, md2022, md2023, md2024)
+colnames(md_all) <- c('year', 'field', 'plot', 'column', 'range', 'Pedigree', 'Replicate', 'Block', 'plant_height')
+md_all$column <- as.integer(md_all$column)
+```
+
+
+#Clean lidar data & add 2020 height information
+```{r}
+labels_ES_2020$year <- 2020
+labels_ES_2020 <- labels_ES_2020[, c('collection', 'field', 'timestamp', 'column', 'range', 'year', 'height_all')]
+#Remove other fields
+labels_ES_2020 <- labels_ES_2020[labels_ES_2020$field %in% c('NYH2', 'NYH3'),]
+#Remove border rows
+labels_ES_2020 <- labels_ES_2020[labels_ES_2020$range >= 2 & labels_ES_2020$range <= 11, ]
+
+labels_ES <- labels_ES[, c('collection', 'field', 'timestamp', 'column', 'range', 'year', 'All.Height.Mean..m.')]
+colnames(labels_ES)[colnames(labels_ES) == 'All.Height.Mean..m.'] <- 'height_all'
+#Remove 2020
+labels_ES <- labels_ES[labels_ES$year %in% c(2021, 2022, 2023, 2024),]
+
+#Add 2020 height information
+labels_ES <- rbind(labels_ES_2020, labels_ES)
+
+#Get date and filename
+for (i in 1:nrow(labels_ES)){
+  Date <- str_split_1(labels_ES[i, 'timestamp'], pattern = 'T')[1]
+  labels_ES[i, 'date'] <- Date
+  labels_ES[i, 'file_name'] <- paste0(Date, "_", labels_ES[i, 'collection'], "_range_", labels_ES[i, 'range'])
+}
+
+#Remove bad pcs
+labels_ES <- labels_ES %>%
+  filter(!(file_name %in% bad_pc$file_name))
+
+#Remove duplicates
+labels_ES <- labels_ES %>%
+  arrange(date, column, desc(range)) %>%
+  distinct(date, column, range, .keep_all = TRUE)
+
+#Remove NAs
+labels_ES[labels_ES$height_all == -1, 'height_all'] = NA
+
+#Combine runs taken on consecutive dates
+labels_ES[labels_ES$date == '2020-07-21', 'date'] <- '2020-07-20'
+labels_ES <- labels_ES[!(labels_ES$date == '2021-07-15' & labels_ES$field == 'NYH2'), ]
+labels_ES[labels_ES$date == '2021-07-16', 'date'] <- '2021-07-15'
+labels_ES[labels_ES$date == '2021-07-23', 'date'] <- '2021-07-22'
+labels_ES[labels_ES$date == '2021-08-04', 'date'] <- '2021-08-03'
+labels_ES[labels_ES$date == '2022-06-22', 'date'] <- '2022-06-21'
+labels_ES[labels_ES$date == '2022-07-01', 'date'] <- '2022-06-28'
+```
+
+
+#Reformat date labels VI, pixel, and density
+```{r}
+for (i in 1:nrow(labels_VI)){
+  Image <- str_split_1(labels_VI[i, 'file_name'], pattern = '_')
+  StringDate <- Image[2]
+  ImageDate <- as.Date(StringDate, '%m%d%Y')
+  labels_VI[i, 'date'] <- format(ImageDate, "%m-%d-%Y")
+  labels_VI[i, 'year'] <- format(ImageDate, "%Y")
+  labels_VI[i, 'plot'] <- str_split_1(Image[3], pattern = '.tif')[1]
+  labels_VI[i, 'field'] <- Image[1]
+}
+labels_VI$year <- as.numeric(labels_VI$year)
+
+for (i in 1:nrow(pixel_stats)){
+  Image <- str_split_1(pixel_stats[i, 'file_name'], pattern = '_')
+  StringDate <- Image[2]
+  ImageDate <- as.Date(StringDate, '%m%d%Y')
+  pixel_stats[i, 'date'] <- format(ImageDate, "%m-%d-%Y")
+  pixel_stats[i, 'year'] <- format(ImageDate, "%Y")
+  pixel_stats[i, 'plot'] <- str_split_1(Image[3], pattern = '.tif')[1]
+  pixel_stats[i, 'field'] <- Image[1]
+}
+pixel_stats$year <- as.numeric(pixel_stats$year)
+
+for (i in 1:nrow(density_stats)){
+  Image <- str_split_1(density_stats[i, 'file_name'], pattern = '_')
+  StringDate <- Image[1]
+  ImageDate <- as.Date(StringDate, "%Y-%m-%d")
+  density_stats[i, 'date'] <- format(ImageDate, "%m-%d-%Y")
+  density_stats[i, 'year'] <- format(ImageDate, "%Y")
+}
+density_stats$year <- as.numeric(density_stats$year)
+```
+
+
+#Add VI and ES labels
+```{r}
+#Add VIs
+labels_msi <- labels_VI %>% 
+  left_join(md_all, by = join_by(year, field, plot))
+#Remove NAs
+labels_msi <- labels_msi[!is.na(labels_msi$Pedigree),]
+
+#Add ES
+labels_lidar <- labels_ES %>% 
+  left_join(md_all, by = join_by(year, field, column, range))
+#Remove NAs
+labels_lidar <- labels_lidar[!is.na(labels_lidar$Pedigree),]
+```
+
+
+#Trends in VIs & ES parameters
+```{r}
+#VIs
+df_msi <- labels_msi[labels_msi$year == 2021,]
+df_msi %>%
+  ggplot(aes(x=date, y=ndvi)) +
+    geom_boxplot(fill="steelblue") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size=11),
+      axis.text.x = element_text(angle = 45, hjust=1)
+    ) +
+    ggtitle("Trends in VIs - NDVI in 2021") +
+    xlab("Date")
+
+#ES
+df_lidar <- labels_lidar[labels_lidar$year == 2024,]
+df_lidar$date <- as.character(df_lidar$date)
+df_lidar %>%
+  ggplot(aes(x=date, y=height_all)) +
+    geom_boxplot(fill="steelblue") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size=11),
+      axis.text.x = element_text(angle = 45, hjust=1)
+    ) +
+    ggtitle("Trends in ES Plant Height - 2024") +
+    xlab("Date")
+```
+
+
+#Correlations between PH on last ES date and manually measured PH
+```{r}
+cors <- data.frame(Correlation = numeric(), Year = factor())
+for(year in c(2020, 2021, 2022, 2023, 2024)){
+  df = labels_lidar[labels_lidar$year == year,]
+  correlation = cor(df$height_all[df$date == max(df$date)], df$plant_height[df$date == max(df$date)], use = "complete.obs")
+  new_row = cbind("Correlation" = correlation, "Year" = year)
+  cors <- rbind(cors, new_row)
+}
+
+cors %>%
+  ggplot(aes(x=Year, y=Correlation)) +
+    geom_bar(stat = "identity", fill="steelblue") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size=11),
+      axis.text.x = element_text(angle = 45, hjust=1)
+    ) +
+    ggtitle("Correlation between ES PH & Manually Measured PH") +
+    xlab("Year")
+```
+
+
+#Pixel stats
+```{r}
+#Histogram of pixels clipped to 1
+pixel_stats[pixel_stats$clip_ratio !=0,] %>%
+  ggplot(aes(x=clip_ratio)) +
+    geom_histogram(fill="steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Ratio of Points Clipped to 1 by Plot Where Ratio > 0") +
+    xlab("Pixel Ratio")
+
+#Histogram of NAs
+pixel_stats[pixel_stats$NA_ratio > 0,] %>%
+  ggplot(aes(x=NA_ratio)) +
+    geom_histogram(fill="steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Ratio of NAs by Plot Where Ratio > 0") +
+    xlab("Pixel Ratio")
+
+#Summary stats of clipped values and NAs
+summary_clip_rat <- data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Mean', sum_stat_value = mean(pixel_stats$clip_ratio))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Max', sum_stat_value = max(pixel_stats$clip_ratio)))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Proportion of Plot-Level Images', sum_stat_value = nrow(pixel_stats[pixel_stats$clip_ratio !=0,])/nrow(pixel_stats)))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Total Pixels', sum_stat_value = sum(pixel_stats$clip_upper)))
+
+summary_na_rat <- data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Mean', sum_stat_value = mean(pixel_stats$NA_ratio))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Max', sum_stat_value = max(pixel_stats$NA_ratio)))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Proportion of Plot-Level Images', sum_stat_value = nrow(pixel_stats[pixel_stats$NA_ratio !=0,])/nrow(pixel_stats)))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Total Pixels', sum_stat_value = sum(pixel_stats$NA_count)))
+
+summary_stats <- rbind(summary_clip_rat, summary_na_rat)
+summary_stats$pixel_stat <- as.factor(summary_stats$pixel_stat)
+
+#Plot max and mean
+summary_stats[summary_stats$sum_stat != 'Proportion of Plot-Level Images' & summary_stats$sum_stat != 'Total Pixels',] %>%
+  ggplot(aes(x=sum_stat, y=sum_stat_value, fill=pixel_stat)) +
+    geom_bar(position = position_dodge(), stat = "identity") +
+    scale_fill_manual(values=c("#332288", "#88CCEE")) +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Summary Statistics of Plot-Level Pixel Values") +
+    xlab("Summary Statistic") +
+    ylab("Ratio") +
+    guides(fill = guide_legend(title = "Plot-Level Ratio"))
+
+#Plot proportion of images
+summary_stats[summary_stats$sum_stat == 'Proportion of Plot-Level Images',] %>%
+  ggplot(aes(x=sum_stat, y=sum_stat_value, fill=pixel_stat)) +
+    geom_bar(position = position_dodge(), stat = "identity") +
+    scale_fill_manual(values=c("#332288", "#88CCEE")) +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Proportion of Plot-Level Images with Ratios > 1") +
+    xlab("Summary Statistic") +
+    ylab("Proportion") +
+    guides(fill = guide_legend(title = "Plot-Level Ratio"))
+
+#Summary stats of clipped values and NAs by year
+summary_clip_rat <- data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Mean', sum_stat_value = mean(pixel_stats$clip_ratio[pixel_stats$year == 2020]))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Max', sum_stat_value = max(pixel_stats$clip_ratio[pixel_stats$year == 2020])))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Proportion of Plot-Level Images', sum_stat_value = nrow(pixel_stats[pixel_stats$clip_ratio !=0 & pixel_stats$year == 2020,])/nrow(pixel_stats[pixel_stats$year == 2020,])))
+summary_clip_rat <- rbind(summary_clip_rat, data.frame(pixel_stat = 'Clip Ratio', sum_stat = 'Total Pixels', sum_stat_value = sum(pixel_stats$clip_upper[pixel_stats$year == 2020])))
+
+summary_na_rat <- data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Mean', sum_stat_value = mean(pixel_stats$na_ratio[pixel_stats$year == 2020]))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Max', sum_stat_value = max(pixel_stats$na_ratio[pixel_stats$year == 2020])))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Proportion of Plot-Level Images', sum_stat_value = nrow(pixel_stats[pixel_stats$na_ratio !=0 & pixel_stats$year == 2020,])/nrow(pixel_stats[pixel_stats$year == 2020,])))
+summary_na_rat <- rbind(summary_na_rat, data.frame(pixel_stat = 'NA Ratio', sum_stat = 'Total Pixels', sum_stat_value = sum(pixel_stats$NA_count[pixel_stats$year == 2020])))
+
+summary_stats2020 <- rbind(summary_clip_rat, summary_na_rat)
+
+#Plot histograms of dimensions of plot-level images
+pixel_stats[pixel_stats$year == 2024,] %>%
+  ggplot(aes(x=im_height)) +
+    geom_histogram(fill="steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Histogram of Pixel Height of Image in 2024") +
+    xlab("Image Height")
+
+pixel_stats[pixel_stats$year == 2024,] %>%
+  ggplot(aes(x=im_width)) +
+    geom_histogram(fill="steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Histogram of Pixel Width of Image in 2024") +
+    xlab("Image Width")
+
+#Plot range of dimensions
+daily_range <- pixel_stats %>%
+  group_by(year, date) %>%
+  summarise(
+    min_h = min(im_height, na.rm = TRUE),
+    max_h = max(im_height, na.rm = TRUE),
+    avg_h = mean(im_height, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+target_year <- 2024
+ggplot(daily_range %>% filter(year == target_year),
+       aes(x = date, ymin = min_h, ymax = max_h)) +
+    geom_linerange() +
+    geom_point(aes(y = avg_h), size = 0.8) +
+    labs(title = paste("Pixel height range by date in", target_year), x = "Date", y = "Pixel height") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Check GSD and ground truth area
+pixel_stats$im_area = pixel_stats$im_height*pixel_stats$im_width
+pixel_stats_NYH2_2024 <- pixel_stats[pixel_stats$year == 2024 & pixel_stats$field == 'NYH2',]
+pixel_stats_NYH2_2024$GSD[pixel_stats_NYH2_2024$date == '06-21-2024'] <- 0.67
+pixel_stats_NYH2_2024$GSD[pixel_stats_NYH2_2024$date == '07-04-2024'] <- 0.64
+pixel_stats_NYH2_2024$GSD[pixel_stats_NYH2_2024$date == '07-12-2024'] <- 0.62
+pixel_stats_NYH2_2024$GSD[pixel_stats_NYH2_2024$date == '08-29-2024'] <- 0.63
+pixel_stats_NYH2_2024$GSD[pixel_stats_NYH2_2024$date == '09-27-2024'] <- 0.61
+pixel_stats_NYH2_2024$im_area_in <- pixel_stats_NYH2_2024$im_area*(pixel_stats_NYH2_2024$GSD^2)
+pixel_stats_NYH2_2024$im_area_ft <- (pixel_stats_NYH2_2024$im_area*(pixel_stats_NYH2_2024$GSD^2))/144
+#actual plot-level area, including alley, is 105 ft squared
+
+daily_range <- pixel_stats_NYH2_2024 %>%
+  group_by(date) %>%
+  summarise(
+    min_a = min(im_area_ft, na.rm = TRUE),
+    max_a = max(im_area_ft, na.rm = TRUE),
+    avg_a = mean(im_area_ft, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(daily_range,
+       aes(x = date, ymin = min_a, ymax = max_a)) +
+    geom_linerange() +
+    geom_point(aes(y = avg_a), size = 0.8) +
+    labs(title = paste("Plot area range by date in 2024"), x = "Date", y = "Area (square ft)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+#Density map stats
+```{r}
+#Histogram of number of positive values in density maps
+df_mean <- density_stats %>%
+  group_by(date) %>%
+  summarise(max_bydate = mean(max_height, na.rm = TRUE))
+df_mean$date <- as.Date(df_mean$date, '%m-%d-%Y')
+df_mean %>%
+  ggplot(aes(x=date, y=max_bydate)) +
+    geom_point(fill = "steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Average Maximum Height") +
+    xlab("Date") + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+density_stats[density_stats$year == 2020,] %>%
+  mutate(date = factor(date, levels = sort(unique(date)))) %>% 
+  ggplot(aes(x=date, y=max_height)) +
+    geom_boxplot(fill = "steelblue") +
+    theme_minimal() +
+    theme(plot.title = element_text(size=11)) +
+    ggtitle("Maximum Height in 2020") +
+    xlab("Date") + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+#VIs heritabilities by date
+```{r}
+df_msi <- labels_msi[labels_msi$year == 2020,]
+df_msi <- df_msi %>%
+  mutate(genotype_num = as.numeric(factor(Pedigree))) %>%
+  mutate(genotype_num = as.factor(genotype_num))
+df_msi$Replicate <- as.factor(df_msi$Replicate)
+df_msi$Block <- as.factor(df_msi$Block)
+df_msi$field <- as.factor(df_msi$field)
+df_msi$column <- as.numeric(df_msi$column)
+df_msi$range <- as.numeric(df_msi$range)
+df_msi$Colf <- as.factor(df_msi$column)
+df_msi$Rangef <- as.factor(df_msi$range)
+
+#Find Cullis heritability for all VIs
+VIs <- c('ndvi')
+h2_cullis <- c()
+for(VI in VIs){
+  for(date in unique(df_msi$date)){
+    df_msi$VI <- df_msi[,VI]
+    mmLSP <- sommer::mmer(VI ~ 1,
+                      random = ~genotype_num + Colf + Rangef + spl2Da(column,range),
+                      rcov = ~units,
+                      data = df_msi[df_msi['date'] == date, ])
+    vc_g <- mmLSP %>% pluck("sigma") %>% pluck("genotype_num") %>% as.numeric           # genetic variance component
+    n_g <- mmLSP %>% pluck("U") %>% pluck("genotype_num") %>% pluck("VI") %>% length   # number of genotypes
+    C22_g <- mmLSP %>% pluck("PevU") %>% pluck("genotype_num") %>% pluck("VI")         # Prediction error variance matrix for genotypic BLUPs
+    trC22_g <- psych::tr(as.matrix(C22_g))                                              # trace
+    vdBLUP_g <- 2/n_g * (trC22_g - (sum(C22_g)-trC22_g) / (n_g-1))                      # Mean variance of a difference between genotypic BLUPs
+    H2Cullis <- 1-(vdBLUP_g / 2 / vc_g)
+    H2Cullis <- cbind(H2Cullis, VI, date)
+    h2_cullis <- rbind(h2_cullis, H2Cullis)
+  }
+}
+print(h2_cullis)
+
+h2_cullis_msi <- as.data.frame(h2_cullis)
+h2_cullis_msi$H2Cullis <- as.numeric(h2_cullis_msi$H2Cullis)
+h2_cullis_msi$date <- factor(h2_cullis_msi$date, levels = c('06-26-2020', '07-09-2020', '07-15-2020', '07-18-2020', '07-22-2020', '07-28-2020', '08-01-2020', '08-20-2020', '08-26-2020', '09-09-2020', '09-18-2020', '10-02-2020'))
+#h2_cullis_msi$date <- factor(h2_cullis_msi$date, levels = c('06-10-2021', '06-16-2021', '06-21-2021', '06-24-2021', '07-07-2021', '07-15-2021', '07-19-2021', '08-06-2021', '08-10-2021', '08-20-2021', '08-24-2021', '08-27-2021', '09-16-2021', '09-20-2021', '09-24-2021'))
+#h2_cullis_msi$date <- factor(h2_cullis_msi$date, levels = c('06-08-2022', '06-13-2022', '06-20-2022', '06-27-2022', '07-06-2022', '07-19-2022', '07-27-2022', '08-11-2022', '08-24-2022', '09-08-2022', '09-16-2022', '09-20-2022', '09-30-2022', '10-06-2022', '10-12-2022'))
+#h2_cullis_msi$date <- factor(h2_cullis_msi$date, levels = c('06-26-2023', '06-29-2023', '07-05-2023', '07-11-2023', '07-19-2023', '07-25-2023', '08-09-2023', '08-31-2023', '09-12-2023', '09-21-2023'))
+#h2_cullis_msi$date <- factor(h2_cullis_msi$date, levels = c('06-21-2024', '07-04-2024', '07-12-2024', '08-29-2024', '09-27-2024'))
+ggplot(h2_cullis_msi, aes(x = date, y = H2Cullis)) +
+  geom_point(colour = 'steelblue') +
+  labs(title = "Heritabilities of VIs - NDVI in 2020",
+       x = "Date",
+       y = "Cullis Heritability") +
+  ylim(0,1) +
+  theme_minimal() +
+  theme(
+      plot.title = element_text(size=11),
+      axis.text.x = element_text(angle = 45, hjust=1)
+    )
+```
+
+
+#ES heritabilities by date
+```{r}
+df_lidar <- labels_lidar[labels_lidar$year == 2020,]
+df_lidar <- df_lidar %>%
+    mutate(genotype_num = as.numeric(factor(Pedigree))) %>%
+    mutate(genotype_num = as.factor(genotype_num))
+df_lidar$Replicate <- as.factor(df_lidar$Replicate)
+df_lidar$Block <- as.factor(df_lidar$Block)
+df_lidar$field <- as.factor(df_lidar$field)
+df_lidar$column <- as.numeric(df_lidar$column)
+df_lidar$range <- as.numeric(df_lidar$range)
+df_lidar$Colf <- as.factor(df_lidar$column)
+df_lidar$Rangef <- as.factor(df_lidar$range)
+
+#Find Cullis heritability for ES parameters
+ESs <- c('height_all')
+h2_cullis <- c()
+for(ES in ESs){
+  for(date in unique(df_lidar$date)){
+    df_lidar$ES <- df_lidar[,ES]
+    mmLSP <- sommer::mmer(ES ~ 1,
+                      random = ~genotype_num + Colf + Rangef + spl2Da(column,range),
+                      rcov = ~units,
+                      data = df_lidar[df_lidar['date'] == date, ])
+    vc_g <- mmLSP %>% pluck("sigma") %>% pluck("genotype_num") %>% as.numeric           # genetic variance component
+    n_g <- mmLSP %>% pluck("U") %>% pluck("genotype_num") %>% pluck("ES") %>% length   # number of genotypes
+    C22_g <- mmLSP %>% pluck("PevU") %>% pluck("genotype_num") %>% pluck("ES")         # Prediction error variance matrix for genotypic BLUPs
+    trC22_g <- psych::tr(as.matrix(C22_g))                                              # trace
+    vdBLUP_g <- 2/n_g * (trC22_g - (sum(C22_g)-trC22_g) / (n_g-1))   # Mean variance of a difference between genotypic BLUPs
+    H2Cullis <- 1-(vdBLUP_g / 2 / vc_g)
+    H2Cullis <- cbind(H2Cullis, ES, date)
+    h2_cullis <- rbind(h2_cullis, H2Cullis)
+  }
+}
+print(h2_cullis)
+
+h2_cullis_lidar <- as.data.frame(h2_cullis)
+h2_cullis_lidar$H2Cullis <- as.numeric(h2_cullis_lidar$H2Cullis)
+h2_cullis_lidar$date <- factor(h2_cullis_lidar$date, levels = c('2020-06-17', '2020-06-24', '2020-06-30', '2020-07-08', '2020-07-20', '2020-07-29', '2020-08-12', '2020-08-26'))
+#h2_cullis_lidar$date <- factor(h2_cullis_lidar$date, levels = c('2021-06-25', '2021-07-01', '2021-07-10', '2021-07-15', '2021-07-22', '2021-07-27', '2021-08-03', '2021-08-10', '2021-10-13'))
+#h2_cullis_lidar$date <- factor(h2_cullis_lidar$date, levels = c('2022-06-15', '2022-06-21', '2022-06-28', '2022-07-01', '2022-07-06', '2022-07-11', '2022-07-19', '2022-07-27', '2022-10-12'))
+#h2_cullis_lidar$date <- factor(h2_cullis_lidar$date, levels = c('2023-07-05', '2023-07-11', '2023-07-19', '2023-07-25', '2023-08-02', '2023-10-19'))
+#h2_cullis_lidar$date <- factor(h2_cullis_lidar$date, levels = c('2024-07-02', '2024-07-12', '2024-07-18', '2024-07-25', '2024-08-07', '2024-10-17'))
+ggplot(h2_cullis_lidar, aes(x = date, y = H2Cullis)) +
+  geom_point(colour = 'steelblue') +
+  labs(title = "Heritabilities of ES Plant Height - 2020",
+       x = "Date",
+       y = "Cullis Heritability") +
+  ylim(0,1) +
+  theme_minimal() +
+  theme(
+      plot.title = element_text(size=11),
+      axis.text.x = element_text(angle = 45, hjust=1)
+    )
+```
+
+
