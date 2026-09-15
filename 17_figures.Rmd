@@ -1,0 +1,1434 @@
+---
+title: "figures"
+author: "Erin Farmer"
+date: "2025-08-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis")
+```
+
+
+#Load libraries
+```{r}
+library(sommer)
+library(psych)
+library(ggplot2)
+library(stringr)
+library(tidyverse)
+library(caTools)
+require(nnet)
+library(ggfortify)
+library(dplyr)
+library(Metrics)
+library(ggnewscale)
+```
+
+
+#Plot collection dates and GDD equivalence windows
+```{r}
+lidar_df <- read.csv("get_labels/lidar_labels/lidar_labels_NYH2_NYH3_2020-24.csv")
+msi_df <- read.csv("get_labels/MSI_labels/msi_labels_NYH2_NYH3_2020-24.csv")
+gdd <- read.csv("get_labels/get_GDD/gdd_2020-24.csv")
+
+lidar_df <- lidar_df %>% mutate(date = as.Date(date))
+msi_df   <- msi_df   %>% mutate(date = as.Date(date))
+gdd   <- gdd   %>% mutate(date = as.Date(date))
+
+#GDD windows
+windows_msi <- tibble(
+  data_type = "MSI",
+  window_id = c("W1","W2","W3","W4", "W5"),
+  window = c("M1: 542-597","M2: 715-910","M3: 1008-1174","M4: 1943-2035","M5: 2288-2477"),
+  gdd_min   = c(542, 715, 1008, 1943, 2288),
+  gdd_max   = c(597, 910, 1174, 2035, 2477)
+)
+windows_lidar <- tibble(
+  data_type = "LiDAR",
+  window_id = c("W1","W2","W3", "W4"),
+  window = c("L1: 679-791","L2: 883-1008","L3: 1267-1405","L4: 2533-2626"),
+  gdd_min   = c(679, 883, 1267, 2533),
+  gdd_max   = c(791, 1008, 1405, 2626)
+)
+windows_all <- bind_rows(windows_msi, windows_lidar)
+
+#Collapse to a GDD by date curve per year
+collapse_daily <- function(df, label){
+  df %>%
+    group_by(year, date) %>%
+    summarise(cumulative_gdd = median(cumulative_gdd, na.rm = TRUE), .groups = "drop") %>%
+    mutate(data_type = label)
+}
+
+gdd_daily_lidar <- collapse_daily(lidar_df, "LiDAR")
+gdd_daily_msi   <- collapse_daily(msi_df,   "MSI")
+
+#Build intervals - map each (gdd_min, gdd_max) to date
+yrs <- sort(unique(gdd_daily_msi$year))
+gdd$gdd_min <- round(gdd$cumulative_gdd)
+gdd$gdd_max <- round(gdd$cumulative_gdd)
+gdd <- gdd %>%
+  rename(year = YEAR)
+
+intervals_lidar <- tidyr::expand_grid(year = yrs, windows_lidar)
+intervals_lidar$start_date <- NA
+intervals_lidar$end_date <- NA
+for(i in 1:nrow(intervals_lidar)){
+  year = intervals_lidar$year[i]
+  gdd_sub <- gdd[gdd$year == year,]
+  abs_diffs <- abs(gdd_sub$cumulative_gdd - intervals_lidar$gdd_min[i])
+  min_diff <- min(abs_diffs)
+  closest_value <- gdd_sub$cumulative_gdd[which(abs_diffs == min_diff)]
+  intervals_lidar$start_date[i] <- as.character(gdd_sub[gdd_sub$cumulative_gdd == closest_value, "date"])
+  
+  abs_diffs <- abs(gdd_sub$cumulative_gdd - intervals_lidar$gdd_max[i])
+  min_diff <- min(abs_diffs)
+  closest_value <- gdd_sub$cumulative_gdd[which(abs_diffs == min_diff)]
+  intervals_lidar$end_date[i] <- as.character(gdd_sub[gdd_sub$cumulative_gdd == closest_value, "date"])
+}
+intervals_lidar <- intervals_lidar %>% 
+  mutate(start_date = as.Date(start_date)) %>%
+  mutate(end_date = as.Date(end_date))
+intervals_lidar$window = factor(intervals_lidar$window, levels = c("L1: 679-791","L2: 883-1008","L3: 1267-1405","L4: 2533-2626"))
+
+intervals_msi <- tidyr::expand_grid(year = yrs, windows_msi)
+intervals_msi$start_date <- NA
+intervals_msi$end_date <- NA
+for(i in 1:nrow(intervals_msi)){
+  year = intervals_msi$year[i]
+  gdd_sub <- gdd[gdd$year == year,]
+  abs_diffs <- abs(gdd_sub$cumulative_gdd - intervals_msi$gdd_min[i])
+  min_diff <- min(abs_diffs)
+  closest_value <- gdd_sub$cumulative_gdd[which(abs_diffs == min_diff)]
+  intervals_msi$start_date[i] <- as.character(gdd_sub[gdd_sub$cumulative_gdd == closest_value, "date"])
+  
+  abs_diffs <- abs(gdd_sub$cumulative_gdd - intervals_msi$gdd_max[i])
+  min_diff <- min(abs_diffs)
+  closest_value <- gdd_sub$cumulative_gdd[which(abs_diffs == min_diff)]
+  intervals_msi$end_date[i] <- as.character(gdd_sub[gdd_sub$cumulative_gdd == closest_value, "date"])
+}
+intervals_msi <- intervals_msi %>% 
+  mutate(start_date = as.Date(start_date)) %>%
+  mutate(end_date = as.Date(end_date))
+intervals_msi$window = factor(intervals_msi$window, levels = c("M1: 542-597","M2: 715-910","M3: 1008-1174","M4: 1943-2035", "M5: 2288-2477"))
+
+intervals_all   <- bind_rows(intervals_lidar, intervals_msi)
+
+#Points to plot - one point per (year, date, data_type)
+points_all <- bind_rows(
+  lidar_df %>% transmute(year, date, data_type = "LiDAR"),
+  msi_df   %>% transmute(year, date, data_type = "MSI")
+) %>%
+  distinct(year, date, data_type) %>%   # one point per date per type
+  arrange(year, date)
+
+#Plot - years stacked on y; x-axis fixed May–Oct
+x_start <- as.Date("2000-06-01") # year ignored by scale limits + transform below
+x_end   <- as.Date("2000-10-31")
+
+# To align different calendar years on a single May–Oct axis, transform dates to a common dummy year while keeping month/day
+to_dummy_year <- function(d) as.Date(sprintf("2000-%02d-%02d", month(d), day(d)))
+
+intervals_all <- intervals_all %>%
+  mutate(y = factor(year),
+         x0 = to_dummy_year(start_date),
+         x1 = to_dummy_year(end_date))
+
+intervals_lidar <- intervals_lidar %>%
+  mutate(y = factor(year),
+         x0 = to_dummy_year(start_date),
+         x1 = to_dummy_year(end_date))
+
+intervals_msi <- intervals_msi %>%
+  mutate(y = factor(year),
+         x0 = to_dummy_year(start_date),
+         x1 = to_dummy_year(end_date))
+
+points_all <- points_all %>%
+  mutate(y = factor(year),
+         x = to_dummy_year(date))
+
+gdd <- gdd %>%
+  mutate(y = factor(year),
+         x = to_dummy_year(date))
+
+intervals_all$data_type = factor(intervals_all$data_type, levels = c("MSI", "LiDAR"))
+points_all$data_type = factor(points_all$data_type, levels = c("MSI", "LiDAR"))
+
+#Plot GDD by date
+fig_1a <- ggplot(gdd, aes(x = x, y = cumulative_gdd, color = y)) +
+  geom_line(linewidth = 0.9) +
+  # labs(x = "Date", y = "Cumulative GDD", title = "Cumulative GDD by Year", color = "Year") +
+  labs(x = "Date", y = "Cumulative GDD", color = "Year") +
+  scale_y_continuous(limits = c(0, 3000)) +
+  scale_x_date(limits = c(x_start, x_end),
+              date_breaks = "1 month", 
+              date_labels = "%b") +
+  scale_color_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288", "#B66DFF", "#88CCEE", "#074650")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 14, hjust = 1),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+  )
+
+#Replace date with cumulative GDD
+points_all <- points_all %>%
+              left_join(gdd %>% select(cumulative_gdd, date), by = "date")
+points_all$x <- points_all$cumulative_gdd
+
+#Replace date with cumulative GDD
+x_start <- min(points_all$cumulative_gdd)
+x_end   <- max(points_all$cumulative_gdd)
+
+#Plot sampling time points and windows by GDD
+fig_1b <- ggplot() +
+  # shaded windows
+  geom_rect(
+    data = intervals_all[intervals_all$data_type == "MSI",],
+    aes(xmin = gdd_min, xmax = gdd_max,
+        ymin = as.numeric(y) + .01,
+        ymax = as.numeric(y) + .35,
+        fill = window,
+        alpha = window),
+    color = "black", linewidth = 0.25
+  ) +
+  scale_fill_manual(
+    name = "MSI GDD Windows",
+    values = c(
+      "M1: 542-597" = "#44AA99", #1b9e77
+      "M2: 715-910" = "#44AA99",
+      "M3: 1008-1174" = "#44AA99",
+      "M4: 1943-2035" = "#44AA99",
+      "M5: 2288-2477" = "#44AA99"
+    ),
+    guide = guide_legend(order = 2)
+  ) +
+  scale_alpha_manual(
+    name = "MSI GDD Windows",
+    values = c('M1: 542-597' = .10,
+               'M2: 715-910' = .20,
+               'M3: 1008-1174' = .30,
+               'M4: 1943-2035' = .40,
+               'M5: 2288-2477' = 0.50),
+    guide = guide_legend(order = 2)
+  ) +
+  new_scale("fill") +
+  new_scale("alpha") +
+  geom_rect(
+    data = intervals_all[intervals_all$data_type == "LiDAR",],
+    aes(xmin = gdd_min, xmax = gdd_max,
+        ymin = as.numeric(y) - .35,
+        ymax = as.numeric(y) - .01,
+        fill = window,
+        alpha = window),
+    color = "black", linewidth = 0.25
+  ) +
+  scale_fill_manual(
+    name = "LiDAR GDD Windows",
+    values = c(
+      "L1: 679-791" = "#4477AA", #d95f02
+      "L2: 883-1008" = "#4477AA",
+      "L3: 1267-1405" = "#4477AA",
+      "L4: 2533-2626" = "#4477AA"
+    ),
+    guide = guide_legend(order = 3)
+  ) +
+  scale_alpha_manual(
+    name = "LiDAR GDD Windows",
+    values = c('L1: 679-791' = .10,
+               'L2: 883-1008' = .20,
+               'L3: 1267-1405' = .30,
+               'L4: 2533-2626' = .40),
+    guide = guide_legend(order = 3)
+  ) +
+  new_scale("fill") +
+  geom_point(
+    data = points_all[points_all$data_type == "MSI",],
+    aes(x = x, y = as.numeric(y) + 0.175, fill = data_type), # use fill instead of color
+    shape = 21, color = "black", size = 2
+  ) +
+  geom_point(
+    data = points_all[points_all$data_type == "LiDAR",],
+    aes(x = x, y = as.numeric(y) - 0.175, fill = data_type), # use fill instead of color
+    shape = 21, color = "black", size = 2
+  ) +
+  scale_y_continuous(
+    breaks = sort(unique(as.numeric(factor(intervals_all$year)))),
+    labels = levels(factor(intervals_all$year)),
+    name = "Year"
+  ) +
+  geom_hline(yintercept = c(1.5, 2.5, 3.5, 4.5), linetype = 2, linewidth = 0.3, color = "grey50") +
+  scale_x_continuous(
+    limits = c(x_start, x_end),
+    name = "Cumulative GDD"
+  ) +
+  scale_fill_manual(
+    name = "Data Type",
+    values = c(
+      "MSI" = "#44AA99",
+      "LiDAR" = "#4477AA")
+  ) +
+  #scale_color_brewer(palette = "Dark2") +
+  #scale_fill_brewer(palette = "Dark2") +
+  # labs(title = "MSI & LiDAR Sampling Timepoints by Year",
+  #      fill = "Data Type") +
+  labs(fill = "Data Type") +
+  guides(
+    fill = guide_legend(
+      order = 1,
+      override.aes = list(shape = 21, size = 3) # put point in the legend boxes
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 14, hjust = 1),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+  )
+
+ggsave("figs/fig_1a.tif", fig_1a,
+    width = 12, height = 7, dpi = 600, units = "in")
+
+ggsave("figs/fig_1b.tif", fig_1b,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CVBP for MSI with varying latent space sizes
+```{r}
+#Load prediction results
+pred_msi_8 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_8.csv")
+pred_msi_16 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_16.csv")
+pred_msi_32 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_32.csv")
+pred_msi_64 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_64.csv")
+pred_msi_128 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_128.csv")
+pred_msi_256 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_256.csv")
+pred_msi_512 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_512.csv")
+
+#Change pheno names
+mod_accuracies <- rbind(pred_msi_8, pred_msi_16, pred_msi_32, pred_msi_64, pred_msi_128, pred_msi_256, pred_msi_512)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$LatentDimSize <- factor(mod_accuracies$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+#Get CIs
+acc_summarized <- data.frame(Pheno = factor(), LatentDimSize = factor(), Correlation = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(lsp_size in unique(mod_accuracies$LatentDimSize)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$LatentDimSize == lsp_size,]
+    mean <- mean(df_sub$Correlation)
+    sd <- sd(df_sub$Correlation)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, LatentDimSize = lsp_size, Correlation = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized <- rbind(acc_summarized, newrow)
+  }
+}
+acc_summarized$Pheno <- factor(acc_summarized$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized$LatentDimSize <- factor(acc_summarized$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+acc_summarized_rmse <- data.frame(Pheno = factor(), LatentDimSize = factor(), RMSE = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(lsp_size in unique(mod_accuracies$LatentDimSize)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$LatentDimSize == lsp_size,]
+    mean <- mean(df_sub$RMSE)
+    sd <- sd(df_sub$RMSE)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, LatentDimSize = lsp_size, RMSE = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized_rmse <- rbind(acc_summarized_rmse, newrow)
+  }
+}
+acc_summarized_rmse$Pheno <- factor(acc_summarized_rmse$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized_rmse$LatentDimSize <- factor(acc_summarized_rmse$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+#Bar plot with CIs
+# acc_summarized$title <- "MSI"
+lsp_size_msi <- ggplot(acc_summarized, aes(x = Pheno, y = Correlation, fill = LatentDimSize)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = Correlation-CI, ymax = Correlation+CI), position = position_dodge(0.5), width = 0.25, colour="orange", alpha=0.9) +
+  scale_fill_manual(values=c("#BCD2E8", "#91BAD6", "#73A5C6", "#528AAE", "#2E5984", "#1E3F66", "#000040")) +
+  ylim(0, 0.7) +
+  labs(title = "MSI Season-Level Prediction Accuracy by Latent Size",
+       x = "Phenotype",
+       y = "Correlation",
+       fill = "Latent Size") +
+  # labs(x = "Phenotype",
+  #      y = "Correlation",
+  #      fill = "Latent Size") +
+  theme_bw() +
+  # facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+    # legend.position = "none",
+    strip.text = element_text(size = 15)
+  )
+
+lsp_size_msi_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = RMSE, fill = LatentDimSize)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = RMSE-CI, ymax = RMSE+CI), position = position_dodge(0.5), width = 0.25, colour="orange", alpha=0.9) +
+  scale_fill_manual(values=c("#BCD2E8", "#91BAD6", "#73A5C6", "#528AAE", "#2E5984", "#1E3F66", "#000040")) +
+  labs(title = "MSI Season-Level Prediction Accuracy by Latent Size",
+       x = "Phenotype",
+       y = "RMSE",
+       fill = "Latent Size") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/lsp_size_msi.tif", lsp_size_msi,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/lsp_size_msi_rmse.tif", lsp_size_msi_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CVBP for LiDAR with varying latent space sizes
+```{r}
+#Load prediction results
+pred_lidar_8 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_8.csv")
+pred_lidar_16 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_16.csv")
+pred_lidar_32 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_32.csv")
+pred_lidar_64 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_64.csv")
+pred_lidar_128 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_128.csv")
+pred_lidar_256 <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_lidar_CVBP_256.csv")
+pred_lidar_512 <- read.csv("pred_results/CV_dtype_comparisons/pred_lidar_CVBP_512.csv")
+
+#Change pheno names
+mod_accuracies <- rbind(pred_lidar_8, pred_lidar_16, pred_lidar_32, pred_lidar_64, pred_lidar_128, pred_lidar_256, pred_lidar_512)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$LatentDimSize <- factor(mod_accuracies$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+#Get CIs
+acc_summarized <- data.frame(Pheno = factor(), LatentDimSize = factor(), Correlation = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(lsp_size in unique(mod_accuracies$LatentDimSize)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$LatentDimSize == lsp_size,]
+    mean <- mean(df_sub$Correlation)
+    sd <- sd(df_sub$Correlation)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, LatentDimSize = lsp_size, Correlation = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized <- rbind(acc_summarized, newrow)
+  }
+}
+acc_summarized$Pheno <- factor(acc_summarized$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized$LatentDimSize <- factor(acc_summarized$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+acc_summarized_rmse <- data.frame(Pheno = factor(), LatentDimSize = factor(), RMSE = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(lsp_size in unique(mod_accuracies$LatentDimSize)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$LatentDimSize == lsp_size,]
+    mean <- mean(df_sub$RMSE)
+    sd <- sd(df_sub$RMSE)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, LatentDimSize = lsp_size, RMSE = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized_rmse <- rbind(acc_summarized_rmse, newrow)
+  }
+}
+acc_summarized_rmse$Pheno <- factor(acc_summarized_rmse$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized_rmse$LatentDimSize <- factor(acc_summarized_rmse$LatentDimSize, levels = c('8', '16', '32', '64', '128', '256', '512'))
+
+#Bar plot with CIs
+# acc_summarized$title <- "LiDAR"
+lsp_size_lidar <- ggplot(acc_summarized, aes(x = Pheno, y = Correlation, fill = LatentDimSize)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = Correlation-CI, ymax = Correlation+CI), position = position_dodge(0.5), width = 0.25, colour="orange", alpha=0.9) +
+  scale_fill_manual(values=c("#BCD2E8", "#91BAD6", "#73A5C6", "#528AAE", "#2E5984", "#1E3F66", "#000040")) +
+  ylim(0, 0.7) +
+  labs(title = "LiDAR Season-Level Prediction Accuracy by Latent Size",
+       x = "Phenotype",
+       y = "Correlation",
+       fill = "Latent Size") +
+  # labs(x = "Phenotype",
+  #      y = "Correlation",
+  #      fill = "Latent Size") +
+  theme_bw() +
+  # facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+    # legend.position = c(0.83, 0.83),
+    strip.text = element_text(size = 15)
+  )
+
+lsp_size_lidar_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = RMSE, fill = LatentDimSize)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = RMSE-CI, ymax = RMSE+CI), position = position_dodge(0.5), width = 0.25, colour="orange", alpha=0.9) +
+  scale_fill_manual(values=c("#BCD2E8", "#91BAD6", "#73A5C6", "#528AAE", "#2E5984", "#1E3F66", "#000040")) +
+  labs(title = "LiDAR Season-Level Prediction Accuracy by Latent Size",
+       x = "Phenotype",
+       y = "RMSE",
+       fill = "Latent Size") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/lsp_size_lidar.tif", lsp_size_lidar,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/lsp_size_lidar_rmse.tif", lsp_size_lidar_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CVBP season-level data type comparisons
+```{r}
+#Load prediction results
+pred_VI <- read.csv("pred_results/CV_dtype_comparisons/pred_VI_CVBP.csv")
+pred_msi <- read.csv("pred_results/CV_dtype_comparisons/pred_msi_CVBP_512.csv")
+pred_lidar <- read.csv("pred_results/CV_dtype_comparisons/pred_lidar_CVBP_512.csv")
+pred_int <- read.csv("pred_results/CV_dtype_comparisons/pred_int_CVBP_512.csv")
+
+#Change pheno names
+mod_accuracies <- rbind(pred_VI, pred_msi, pred_lidar, pred_int)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$Predictor <- factor(mod_accuracies$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+#Get CIs
+acc_summarized <- data.frame(Pheno = factor(), Predictor = factor(), Correlation = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(pred in unique(mod_accuracies$Predictor)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == pred,]
+    mean <- mean(df_sub$Correlation)
+    sd <- sd(df_sub$Correlation)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, Predictor = pred, Correlation = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized <- rbind(acc_summarized, newrow)
+  }
+}
+acc_summarized$Pheno <- factor(acc_summarized$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized$Predictor <- factor(acc_summarized$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+acc_summarized_rmse <- data.frame(Pheno = factor(), Predictor = factor(), RMSE = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(pred in unique(mod_accuracies$Predictor)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == pred,]
+    mean <- mean(df_sub$RMSE)
+    sd <- sd(df_sub$RMSE)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, Predictor = pred, RMSE = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized_rmse <- rbind(acc_summarized_rmse, newrow)
+  }
+}
+acc_summarized_rmse$Pheno <- factor(acc_summarized_rmse$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized_rmse$Predictor <- factor(acc_summarized_rmse$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Integrated Latent Phenotypes"] - acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"])/acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+# }
+# mean(difs)
+
+#Bar plot with CIs
+acc_summarized$title <- "CVBP"
+CVBP <- ggplot(acc_summarized, aes(x = Pheno, y = Correlation, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = Correlation-CI, ymax = Correlation+CI), position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  ylim(0, 0.85) +
+  # labs(title = "CVBP Season-Level Prediction Accuracy",
+  #      x = "Phenotype",
+  #      y = "Correlation",
+  #      fill = "Predictor") +
+  labs(x = "Phenotype",
+       y = "Correlation",
+       fill = "Predictor") +
+  theme_bw() +
+  facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    #legend.title = element_text(size = 15),
+    #legend.text = element_text(size = 14),
+    legend.position = "none",
+    strip.text = element_text(size = 15)
+  )
+
+CVBP_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = RMSE, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = RMSE-CI, ymax = RMSE+CI), position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  labs(title = "CVBP Season-Level Prediction Accuracy",
+       x = "Phenotype",
+       y = "RMSE",
+       fill = "Predictor") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/CVBP.tif", CVBP,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/CVBP_rmse.tif", CVBP_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CV1 season-level data type comparisons
+```{r}
+#Load prediction results
+pred_VI <- read.csv("pred_results/CV_dtype_comparisons/pred_VI_CV1.csv")
+pred_msi <- read.csv("pred_results/CV_dtype_comparisons/pred_msi_CV1_512.csv")
+pred_lidar <- read.csv("pred_results/CV_dtype_comparisons/pred_lidar_CV1_512.csv")
+pred_int <- read.csv("pred_results/CV_dtype_comparisons/pred_int_CV1_512.csv")
+
+#Change pheno names
+mod_accuracies <- rbind(pred_VI, pred_msi, pred_lidar, pred_int)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$Predictor <- factor(mod_accuracies$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+#Get CIs
+acc_summarized <- data.frame(Pheno = factor(), Predictor = factor(), Correlation = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(pred in unique(mod_accuracies$Predictor)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == pred,]
+    mean <- mean(df_sub$Correlation)
+    sd <- sd(df_sub$Correlation)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, Predictor = pred, Correlation = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized <- rbind(acc_summarized, newrow)
+  }
+}
+acc_summarized$Pheno <- factor(acc_summarized$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized$Predictor <- factor(acc_summarized$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+acc_summarized_rmse <- data.frame(Pheno = factor(), Predictor = factor(), RMSE = numeric(), SD = numeric(), SE = numeric(), CI = numeric())
+for(pheno in unique(mod_accuracies$Pheno)){
+  for(pred in unique(mod_accuracies$Predictor)){
+    df_sub <- mod_accuracies[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == pred,]
+    mean <- mean(df_sub$RMSE)
+    sd <- sd(df_sub$RMSE)
+    se <- sd/sqrt(10)
+    ci = se * qt((1-0.05)/2 + .5, 10-1)
+    newrow <- data.frame(Pheno = pheno, Predictor = pred, RMSE = mean, SD = sd, SE = se, CI = ci)
+    acc_summarized_rmse <- rbind(acc_summarized_rmse, newrow)
+  }
+}
+acc_summarized_rmse$Pheno <- factor(acc_summarized_rmse$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+acc_summarized_rmse$Predictor <- factor(acc_summarized_rmse$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Integrated Latent Phenotypes"] - acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"])/acc_summarized$Correlation[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+#   print(paste0(pheno, ": ", dif))
+# }
+# mean(difs)
+
+#Bar plot with CIs
+acc_summarized$title <- "CV1"
+CV1 <- ggplot(acc_summarized, aes(x = Pheno, y = Correlation, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = Correlation-CI, ymax = Correlation+CI), position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  ylim(0, 0.85) +
+  # labs(title = "CV1 Season-Level Prediction Accuracy",
+  #      x = "Phenotype",
+  #      y = "Correlation",
+  #      fill = "Predictor") +
+  labs(x = "Phenotype",
+       y = "Correlation",
+       fill = "Predictor") +
+  theme_bw() +
+  facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    #axis.title = element_text(size = 15),
+    axis.title = element_blank(),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+    legend.position = c(0.85, 0.87),
+    strip.text = element_text(size = 15)
+  )
+
+CV1_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = RMSE, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = RMSE-CI, ymax = RMSE+CI), position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  labs(title = "CV1 Season-Level Prediction Accuracy",
+       x = "Phenotype",
+       y = "RMSE",
+       fill = "Predictor") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/CV1.tif", CV1,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/CV1_rmse.tif", CV1_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot LO1Y for season-level data type comparisons
+```{r}
+#Load prediction results
+pred_VI <- rbind(read.csv("pred_results/CV_dtype_comparisons/pred_VI_LO1Yv2.csv"), read.csv("pred_results/CV_dtype_comparisons/pred_VI_LO1Yv3.csv"))
+pred_msi <- rbind(read.csv("pred_results/CV_dtype_comparisons/pred_msi_LO1Yv2_512.csv"), read.csv("pred_results/CV_dtype_comparisons/pred_msi_LO1Yv3_512.csv"))
+pred_lidar <- rbind(read.csv("pred_results/CV_dtype_comparisons/pred_lidar_LO1Yv2_512.csv"), read.csv("pred_results/CV_dtype_comparisons/pred_lidar_LO1Yv3_512.csv"))
+pred_int <- rbind(read.csv("pred_results/CV_dtype_comparisons/pred_int_LO1Yv2_512.csv"), read.csv("pred_results/CV_dtype_comparisons/pred_int_LO1Yv3_512.csv"))
+
+#Change pheno names
+mod_accuracies <- rbind(pred_VI, pred_msi, pred_lidar, pred_int)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$Predictor <- factor(mod_accuracies$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, Predictor) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    mean_val = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$ymax[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Integrated Latent Phenotypes"] - acc_summarized$ymax[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"])/acc_summarized$ymax[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+# }
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$ymin[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Integrated Latent Phenotypes"] - acc_summarized$ymin[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"])/acc_summarized$ymin[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+# }
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Integrated Latent Phenotypes"] - acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"])/acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+#   print(paste0(pheno, ": ", dif))
+# }
+# mean(difs)
+
+acc_summarized_rmse <- mod_accuracies %>%
+  group_by(Pheno, Predictor) %>%
+  summarise(
+    ymin = min(RMSE, na.rm = TRUE),
+    ymax = max(RMSE, na.rm = TRUE),
+    mean_val = mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+acc_summarized$title <- "LO1Y"
+LO1Y <- ggplot(acc_summarized, aes(x = Pheno, y = mean_val, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  ylim(0, 0.85) +
+  # labs(x = "Phenotype",
+  #     y = "Correlation",
+  #     title = "LO1Y Season-Level Prediction Accuracy",
+  #     fill = "Predictor"
+  # ) +
+  labs(x = "Phenotype",
+      y = "Correlation",
+      fill = "Predictor"
+  ) +
+  theme_bw() +
+  facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    #legend.title = element_text(size = 15),
+    #legend.text = element_text(size = 14),
+    legend.position = "none",
+    strip.text = element_text(size = 15)
+  )
+
+LO1Y_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = mean_val, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  theme_minimal() +
+  labs(
+    x = "Phenotype",
+    y = "RMSE",
+    title = "LO1Y Season-Level Prediction Accuracy",
+    fill = "Predictor"
+  ) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/LO1Y.tif", LO1Y,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/LO1Y_rmse.tif", LO1Y_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot Test for season-level data type comparisons
+```{r}
+#Load prediction results
+pred_VI <- read.csv("pred_results/CV_dtype_comparisons/pred_VI_Test.csv")
+pred_msi <- read.csv("pred_results/CV_dtype_comparisons/pred_msi_Test_512.csv")
+pred_lidar <- read.csv("pred_results/CV_dtype_comparisons/pred_lidar_Test_512.csv")
+pred_int <- read.csv("pred_results/CV_dtype_comparisons/pred_int_Test_512.csv")
+
+#Change pheno names
+mod_accuracies <- rbind(pred_VI, pred_msi, pred_lidar, pred_int)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$Predictor <- factor(mod_accuracies$Predictor, levels = c('Vegetation Indices', 'MSI Latent Phenotypes', 'LiDAR Latent Phenotypes', 'Integrated Latent Phenotypes'))
+
+# difs <- c()
+# for(pheno in unique(mod_accuracies$Pheno)){
+#   dif <- (mod_accuracies$Correlation[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == "Integrated Latent Phenotypes"] - mod_accuracies$Correlation[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == "Vegetation Indices"])/mod_accuracies$Correlation[mod_accuracies$Pheno == pheno & mod_accuracies$Predictor == "Vegetation Indices"]
+#   difs <- c(difs, dif)
+#   print(paste0(pheno, ": ", dif))
+# }
+# mean(difs)
+
+mod_accuracies$title <- "Test"
+Test <- ggplot(mod_accuracies, aes(x = Pheno, y = Correlation, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  ylim(0, 0.85) +
+  # labs(x = "Phenotype",
+  #     y = "Correlation",
+  #     title = "Test Season-Level Prediction Accuracy",
+  #     fill = "Predictor"
+  # ) +
+  labs(x = "Phenotype",
+      y = "Correlation",
+      fill = "Predictor"
+  ) +
+  theme_bw() +
+  facet_grid(. ~ title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    #legend.title = element_text(size = 15),
+    #legend.text = element_text(size = 14),
+    legend.position = "none",
+    strip.text = element_text(size = 15)
+  )
+
+Test_rmse <- ggplot(mod_accuracies, aes(x = Pheno, y = RMSE, fill = Predictor)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  scale_fill_manual(values=c("#AA4499", "#DDCC77", "#44AA99", "#332288")) +
+  theme_minimal() +
+  labs(
+    x = "Phenotype",
+    y = "RMSE",
+    title = "Test Season-Level Prediction Accuracy",
+    fill = "Predictor"
+  ) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/Test.tif", Test,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/Test_rmse.tif", Test_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CV Experiments for MSI latent codes
+```{r}
+#Load prediction results
+pred_msi_CVBP <- read.csv("pred_results/CVBP_lsp_size_comparisons/pred_msi_CVBP_512.csv")
+pred_msi_CV1 <- read.csv("pred_results/CV_comparisons/pred_msi_CV1_512.csv")
+pred_msi_LO1Y <- rbind(read.csv("pred_results/CV_comparisons/pred_msi_LO1Yv0_512.csv"), read.csv("pred_results/CV_comparisons/pred_msi_LO1Yv1_512.csv"), read.csv("pred_results/CV_comparisons/pred_msi_LO1Yv2_512.csv"), read.csv("pred_results/CV_comparisons/pred_msi_LO1Yv3_512.csv"))
+pred_msi_CV00 <- rbind(read.csv("pred_results/CV_comparisons/pred_msi_CV00v0_512.csv"), read.csv("pred_results/CV_comparisons/pred_msi_CV00v1_512.csv"))
+
+pred_msi_LO1Y <- pred_msi_LO1Y %>% dplyr::select(!c(Version))
+pred_msi_CV00 <- pred_msi_CV00 %>% dplyr::select(!c(Version))
+
+#Change pheno names
+mod_accuracies <- rbind(pred_msi_CVBP, pred_msi_CV1, pred_msi_LO1Y, pred_msi_CV00)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$CV <- factor(mod_accuracies$CV, levels = c('CV00', 'LO1Y', 'CV1', 'CVBP'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, CV) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    mean_val = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+acc_summarized_rmse <- mod_accuracies %>%
+  group_by(Pheno, CV) %>%
+  summarise(
+    ymin = min(RMSE, na.rm = TRUE),
+    ymax = max(RMSE, na.rm = TRUE),
+    mean_val = mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CVBP"] - acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CV00"])/acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CV00"]
+#   difs <- c(difs, dif)
+#   print(paste0(pheno, ": ", dif))
+# }
+# mean(difs)
+
+acc_summarized$title <- "MSI"
+cv_msi <- ggplot(acc_summarized, aes(x = Pheno, y = mean_val, fill = CV)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c('#4477AA', '#B66DFF', "#88CCEE", "#AA3377")) +
+  ylim(0, 0.8) +
+  theme_bw() +
+  # labs(x = "Phenotype",
+  #     y = "Correlation",
+  #     title = "MSI Season-Level Prediction Accuracy by CV Scheme",
+  #     fill = "CV Scheme"
+  # ) +
+  labs(x = "Phenotype",
+      y = "Correlation",
+      fill = "CV Scheme"
+  ) +
+  facet_grid(. ~title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    #legend.title = element_text(size = 12),
+    #legend.text = element_text(size = 11),
+    legend.position = "none",
+    strip.text = element_text(size = 15)
+  )
+
+cv_msi_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = mean_val, fill = CV)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c('#4477AA', '#B66DFF', "#88CCEE", "#AA3377")) +
+  theme_minimal() +
+  labs(
+    x = "Phenotype",
+    y = "RMSE",
+    title = "MSI Season-Level Prediction Accuracy by CV Scheme",
+    fill = "CV Scheme"
+  ) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/cv_msi.tif", cv_msi,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/cv_msi_rmse.tif", cv_msi_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot CV Experiments for LiDAR latent codes
+```{r}
+#Load prediction results
+pred_lidar_CVBP <- read.csv("pred_results/CV_comparisons/pred_lidar_CVBP_512.csv")
+pred_lidar_CV1 <- read.csv("pred_results/CV_comparisons/pred_lidar_CV1_512.csv")
+pred_lidar_LO1Y <- rbind(read.csv("pred_results/CV_comparisons/pred_lidar_LO1Yv0_512.csv"), read.csv("pred_results/CV_comparisons/pred_lidar_LO1Yv1_512.csv"), read.csv("pred_results/CV_comparisons/pred_lidar_LO1Yv2_512.csv"), read.csv("pred_results/CV_comparisons/pred_lidar_LO1Yv3_512.csv"))
+pred_lidar_CV00 <- rbind(read.csv("pred_results/CV_comparisons/pred_lidar_CV00v0_512.csv"), read.csv("pred_results/CV_comparisons/pred_lidar_CV00v1_512.csv"))
+
+pred_lidar_LO1Y <- pred_lidar_LO1Y %>% dplyr::select(!c(Version))
+pred_lidar_CV00 <- pred_lidar_CV00 %>% dplyr::select(!c(Version))
+
+#Change pheno names
+mod_accuracies <- rbind(pred_lidar_CVBP, pred_lidar_CV1, pred_lidar_LO1Y, pred_lidar_CV00)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$CV <- factor(mod_accuracies$CV, levels = c('CV00', 'LO1Y', 'CV1', 'CVBP'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, CV) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    mean_val = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+acc_summarized_rmse <- mod_accuracies %>%
+  group_by(Pheno, CV) %>%
+  summarise(
+    ymin = min(RMSE, na.rm = TRUE),
+    ymax = max(RMSE, na.rm = TRUE),
+    mean_val = mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Pheno_num = as.numeric(factor(Pheno)) * 2) #use to add more space between phenos
+
+# difs <- c()
+# for(pheno in unique(acc_summarized$Pheno)){
+#   dif <- (acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CVBP"] - acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CV00"])/acc_summarized$mean_val[acc_summarized$Pheno == pheno & acc_summarized$CV == "CV00"]
+#   difs <- c(difs, dif)
+#   print(paste0(pheno, ": ", dif))
+# }
+# mean(difs)
+
+acc_summarized$title <- "LiDAR"
+cv_lidar <- ggplot(acc_summarized, aes(x = Pheno, y = mean_val, fill = CV)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c('#4477AA', '#B66DFF', "#88CCEE", "#AA3377")) +
+  ylim(0, 0.8) +
+  theme_bw() +
+  # labs(x = "Phenotype",
+  #     y = "Correlation",
+  #     title = "LiDAR Season-Level Prediction Accuracy by CV Scheme without Senescence Date",
+  #     fill = "CV Scheme"
+  # ) +
+  labs(x = "Phenotype",
+      y = "Correlation",
+      fill = "CV Scheme"
+  ) +
+  facet_grid(. ~title) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14),
+    legend.position = c(0.92, 0.84),
+    strip.text = element_text(size = 15)
+  )
+
+cv_lidar_rmse <- ggplot(acc_summarized_rmse, aes(x = Pheno, y = mean_val, fill = CV)) +
+  geom_bar(stat = 'identity', position = position_dodge(0.5), width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                position = position_dodge(0.5), width = 0.25, colour="black", alpha=0.9) +
+  scale_fill_manual(values=c('#4477AA', '#B66DFF', "#88CCEE", "#AA3377")) +
+  theme_minimal() +
+  labs(
+    x = "Phenotype",
+    y = "RMSE",
+    title = "LiDAR Season-Level Prediction Accuracy by CV Scheme without Senescence Date",
+    fill = "CV Scheme"
+  ) +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11, angle = 45, hjust = 1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+ggsave("figs/cv_lidar.tif", cv_lidar,
+    width = 12, height = 9, dpi = 600, units = "in")
+
+ggsave("figs/cv_lidar_rmse.tif", cv_lidar_rmse,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot early season prediction results for integrated latent space
+```{r}
+M1_5_L1_4 <- read.csv("pred_results/CV_dtype_comparisons/pred_int_CVBP_512.csv")
+M1_5_L1_3 <- read.csv("pred_results/early_season_predictions/pred_int_M1-5_L1-3_CVBP_512.csv")
+M1_4_L1_3 <- read.csv("pred_results/early_season_predictions/pred_int_M1-4_L1-3_CVBP_512.csv")
+M1_3_L1_3 <- read.csv("pred_results/early_season_predictions/pred_int_M1-3_L1-3_CVBP_512.csv")
+M1_3_L1_2 <- read.csv("pred_results/early_season_predictions/pred_int_M1-3_L1-2_CVBP_512.csv")
+M1_2_L1_2 <- read.csv("pred_results/early_season_predictions/pred_int_M1-2_L1-2_CVBP_512.csv")
+
+M1_5_L1_4$GDD <- "M1-5, L1-4"
+M1_5_L1_3$GDD <- "M1-5, L1-3"
+M1_4_L1_3$GDD <- "M1-4, L1-3"
+M1_3_L1_3$GDD <- "M1-3, L1-3"
+M1_3_L1_2$GDD <- "M1-3, L1-2"
+M1_2_L1_2$GDD <- "M1-2, L1-2"
+
+mod_accuracies <- rbind(M1_5_L1_4, M1_5_L1_3, M1_4_L1_3, M1_3_L1_3, M1_3_L1_2, M1_2_L1_2)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$GDD <- factor(mod_accuracies$GDD, levels = c('M1-2, L1-2', 'M1-3, L1-2', 'M1-3, L1-3', 'M1-4, L1-3', 'M1-5, L1-3', 'M1-5, L1-4'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, GDD) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    Correlation = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fig_10 <- ggplot(acc_summarized, aes(x = GDD, y = Pheno, fill = Correlation)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = format(round(Correlation, 2), nsmall = 2)), color = "white", size = 3) +
+  #scale_fill_gradient(low = "white", high = "blue") +
+  coord_fixed() +
+  theme(plot.title = element_text(size=11), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(title = 'Integrated Latent Phenotypes Prediction Accuracy', y = "Phenotype", x = "GDD Windows")
+
+ggsave("figs/fig_10.tif", fig_10,
+    width = 6, height = 5, dpi = 600, units = "in")
+```
+
+
+#Plot early season prediction results for msi latent space
+```{r}
+M1_5 <- read.csv("pred_results/CV_dtype_comparisons/pred_msi_CVBP_512.csv")
+M1_4 <- read.csv("pred_results/early_season_predictions/pred_msi_M1-4_CVBP_512.csv")
+M1_3 <- read.csv("pred_results/early_season_predictions/pred_msi_M1-3_CVBP_512.csv")
+M1_2 <- read.csv("pred_results/early_season_predictions/pred_msi_M1-2_CVBP_512.csv")
+
+M1_5$GDD <- "M1-5"
+M1_4$GDD <- "M1-4"
+M1_3$GDD <- "M1-3"
+M1_2$GDD <- "M1-2"
+
+mod_accuracies <- rbind(M1_5, M1_4, M1_3, M1_2)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$GDD <- factor(mod_accuracies$GDD, levels = c('M1-2', 'M1-3', 'M1-4', 'M1-5'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, GDD) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    Correlation = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fig_11 <- ggplot(acc_summarized, aes(x = GDD, y = Pheno, fill = Correlation)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = format(round(Correlation, 2), nsmall = 2)), color = "white", size = 3) +
+  #scale_fill_gradient(low = "white", high = "blue") +
+  coord_fixed() +
+  theme(plot.title = element_text(size=11), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(title = 'MSI Latent Phenotypes Prediction Accuracy', y = "Phenotype", x = "GDD Windows")
+
+ggsave("figs/fig_11.tif", fig_11,
+    width = 6, height = 5, dpi = 600, units = "in")
+```
+
+
+#Plot early season prediction results for lidar latent space
+```{r}
+L1_4 <- read.csv("pred_results/CV_dtype_comparisons/pred_lidar_CVBP_512.csv")
+L1_3 <- read.csv("pred_results/early_season_predictions/pred_lidar_L1-3_CVBP_512.csv")
+L1_2 <- read.csv("pred_results/early_season_predictions/pred_lidar_L1-2_CVBP_512.csv")
+
+L1_4$GDD <- "L1-4"
+L1_3$GDD <- "L1-3"
+L1_2$GDD <- "L1-2"
+
+mod_accuracies <- rbind(L1_4, L1_3, L1_2)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$GDD <- factor(mod_accuracies$GDD, levels = c('L1-2', 'L1-3', 'L1-4'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, GDD) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    Correlation = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fig_12 <- ggplot(acc_summarized, aes(x = GDD, y = Pheno, fill = Correlation)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = format(round(Correlation, 2), nsmall = 2)), color = "white", size = 3) +
+  #scale_fill_gradient(low = "white", high = "blue") +
+  coord_fixed() +
+  theme(plot.title = element_text(size=11), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(title = 'LiDAR Latent Phenotypes Prediction Accuracy', y = "Phenotype", x = "GDD Windows")
+
+ggsave("figs/fig_12.tif", fig_12,
+    width = 6, height = 5, dpi = 600, units = "in")
+```
+
+
+#Plot early season prediction results for VIs
+```{r}
+M1_5 <- read.csv("pred_results/CV_dtype_comparisons/pred_vi_CVBP.csv")
+M1_4 <- read.csv("pred_results/early_season_predictions/pred_vi_M1-4_CVBP.csv")
+M1_3 <- read.csv("pred_results/early_season_predictions/pred_vi_M1-3_CVBP.csv")
+M1_2 <- read.csv("pred_results/early_season_predictions/pred_vi_M1-2_CVBP.csv")
+
+M1_5$GDD <- "M1-5"
+M1_4$GDD <- "M1-4"
+M1_3$GDD <- "M1-3"
+M1_2$GDD <- "M1-2"
+
+mod_accuracies <- rbind(M1_5, M1_4, M1_3, M1_2)
+mod_accuracies[mod_accuracies$Pheno == "silking_days", "Pheno"] = "Days to Silking"
+mod_accuracies[mod_accuracies$Pheno == "anthesis_days", "Pheno"] = "Days to Anthesis"
+mod_accuracies[mod_accuracies$Pheno == "grain_yield", "Pheno"] = "Grain Yield"
+mod_accuracies[mod_accuracies$Pheno == "plant_height", "Pheno"] = "Plant Height"
+mod_accuracies[mod_accuracies$Pheno == "ear_height", "Pheno"] = "Ear Height"
+mod_accuracies[mod_accuracies$Pheno == "stand_count", "Pheno"] = "Stand Count"
+mod_accuracies[mod_accuracies$Pheno == "stalk_lodging", "Pheno"] = "Stalk Lodging"
+mod_accuracies[mod_accuracies$Pheno == "grain_moisture", "Pheno"] = "Grain Moisture"
+mod_accuracies[mod_accuracies$Pheno == "ASI", "Pheno"] = "Anthesis-Silking Interval"
+mod_accuracies$Pheno <- factor(mod_accuracies$Pheno, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+mod_accuracies$GDD <- factor(mod_accuracies$GDD, levels = c('M1-2', 'M1-3', 'M1-4', 'M1-5'))
+
+acc_summarized <- mod_accuracies %>%
+  group_by(Pheno, GDD) %>%
+  summarise(
+    ymin = min(Correlation, na.rm = TRUE),
+    ymax = max(Correlation, na.rm = TRUE),
+    Correlation = mean(Correlation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fig_13 <- ggplot(acc_summarized, aes(x = GDD, y = Pheno, fill = Correlation)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = format(round(Correlation, 2), nsmall = 2)), color = "white", size = 3) +
+  #scale_fill_gradient(low = "white", high = "blue") +
+  coord_fixed() +
+  theme(plot.title = element_text(size=11), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(title = 'Vegetation Indices Prediction Accuracy', y = "Phenotype", x = "GDD Windows")
+
+ggsave("figs/fig_13.tif", fig_13,
+    width = 6, height = 5, dpi = 600, units = "in")
+```
+
+
+#Plot heritabilities of latent phenotypes
+```{r}
+h2_cullis_msi <- read.csv("cullis_heritability/h2_cullis_msi_NYH2_NYH3_2020-23_CVBP_512_equiv.csv")
+h2_cullis_lidar <- read.csv("cullis_heritability/h2_cullis_lidar_NYH2_NYH3_2020-23_CVBP_512_equiv.csv")
+
+h2_cullis_msi$h2_cullis[h2_cullis_msi$h2_cullis < 0] = 0
+h2_cullis_lidar$h2_cullis[h2_cullis_lidar$h2_cullis < 0] = 0
+h2_cullis_all <- rbind(h2_cullis_msi, h2_cullis_lidar)
+
+cullis_lsp <- ggplot(h2_cullis_all, aes(x = h2_cullis, fill = dtype)) +
+  geom_histogram(aes(y = after_stat(density)), position = "identity", alpha = 0.7, bins = 20, color = "#e9ecef") +
+  scale_fill_manual(values=c("#AA4499", "#88CCEE")) +
+  scale_x_continuous(breaks = seq(0.5, 1, by = 0.5)) +
+  labs(x = expression(H[C]^2), y = "Density", fill = "Data Type") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 14, hjust = 1),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 14)
+  )
+
+ggsave("figs/cullis_lsp.tif", cullis_lsp,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+
+
+#Plot heritabilities of manually measured phenotypes
+```{r}
+h2_cullis_msi <- read.csv("cullis_heritability/h2_cullis_msi_NYH2_NYH3_2020-23_CVBP_512_equiv.csv")
+h2_cullis_lidar <- read.csv("cullis_heritability/h2_cullis_lidar_NYH2_NYH3_2020-23_CVBP_512_equiv.csv")
+h2_cullis_manual <- read.csv("cullis_heritability/h2_cullis_pheno_NYH2_NYH3_2020-23_CVBP_equiv.csv")
+
+h2_cullis_msi$h2_cullis[h2_cullis_msi$h2_cullis < 0] = 0
+h2_cullis_lidar$h2_cullis[h2_cullis_lidar$h2_cullis < 0] = 0
+h2_cullis_manual <- h2_cullis_manual[!h2_cullis_manual$pheno == "plot_weight",]
+colnames(h2_cullis_manual)[colnames(h2_cullis_manual)=='pheno'] <- 'lf'
+h2_cullis_all <- rbind(h2_cullis_msi, h2_cullis_lidar, h2_cullis_manual)
+
+h2_cullis_manual[h2_cullis_manual$lf == "silking_days", "lf"] = "Days to Silking"
+h2_cullis_manual[h2_cullis_manual$lf == "anthesis_days", "lf"] = "Days to Anthesis"
+h2_cullis_manual[h2_cullis_manual$lf == "grain_yield", "lf"] = "Grain Yield"
+h2_cullis_manual[h2_cullis_manual$lf == "plant_height", "lf"] = "Plant Height"
+h2_cullis_manual[h2_cullis_manual$lf == "ear_height", "lf"] = "Ear Height"
+h2_cullis_manual[h2_cullis_manual$lf == "stand_count", "lf"] = "Stand Count"
+h2_cullis_manual[h2_cullis_manual$lf == "stalk_lodging", "lf"] = "Stalk Lodging"
+h2_cullis_manual[h2_cullis_manual$lf == "grain_moisture", "lf"] = "Grain Moisture"
+h2_cullis_manual[h2_cullis_manual$lf == "ASI", "lf"] = "Anthesis-Silking Interval"
+h2_cullis_manual$lf <- factor(h2_cullis_manual$lf, levels = c('Days to Silking', 'Days to Anthesis', 'Anthesis-Silking Interval', 'Grain Moisture', 'Plant Height', 'Ear Height', 'Stand Count', 'Stalk Lodging', 'Grain Yield'))
+
+cullis_traits_boxplot <- h2_cullis_manual %>%
+  ggplot(aes(x=lf, y=h2_cullis)) +
+    geom_boxplot(fill = "#4477AA") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 15),
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 14, angle = 45, hjust = 1),
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 14)
+    ) +
+    # labs(title = "Heritabilities of Manually Measured Phenotypes",
+    #    x = "Phenotype",
+    #    y = expression(H[C]^2)
+    labs(x = "Phenotype",
+         y = expression(H[C]^2)
+    )
+
+ggsave("figs/cullis_traits_boxplot.tif", cullis_traits_boxplot,
+    width = 12, height = 7, dpi = 600, units = "in")
+```
+

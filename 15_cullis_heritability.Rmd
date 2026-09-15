@@ -1,0 +1,409 @@
+---
+title: "Heritabilities"
+author: "Erin Farmer"
+date: "2025-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/workdir/eef52/UAV-UGV")
+```
+
+
+```{r}
+library(asreml)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyr)
+```
+
+
+#Read in data
+```{r}
+cv = 'CVBP'
+cv_version = ''
+lsp_size = 512
+equivdates = TRUE
+
+df_lidar <- read.csv(paste0("labels/labels_z_lidar_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+df_msi <- read.csv(paste0("labels/labels_z_msi_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+df_lidar <- df_lidar[,-c(1)]
+df_msi <- df_msi[,-c(1)]
+
+#Remove test
+df_lidar <- df_lidar[df_lidar$train_set != "test",]
+df_msi <- df_msi[df_msi$train_set != "test",]
+
+#Remove lidar senescence date (if not removed, will be removed as NAs later but retain set of plots observed)
+#df_lidar <- df_lidar[df_lidar$GDD_equiv != '2533-2626',]
+
+#Constrain to same set of plots
+df_lidar <- df_lidar[df_lidar$uniqueID %in% unique(df_msi$uniqueID), ]
+df_msi <- df_msi[df_msi$uniqueID %in% unique(df_lidar$uniqueID), ]
+```
+
+
+#Get G2F data
+```{r}
+#Get G2F information
+labels2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+labels2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+labels2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+labels2023 = read.csv("G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+labels2024 = read.csv("G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter to NYH2 & NYH3
+labels2020 <- labels2020[labels2020$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2021 <- labels2021[labels2021$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2022 <- labels2022[labels2022$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2023 <- labels2023[labels2023$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2024 <- labels2024[labels2024$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+
+#Create single df
+labels2020$`Date Plot Planted [MM/DD/YY]` <- as.Date(labels2020$`Date Plot Planted [MM/DD/YY]`[1], '%m/%d/%Y')
+labels2022$Source <- NA
+labels2023 <- labels2023[,-c(1)]
+labels2024 <- labels2024[,-c(1)]
+labels_all <- rbind(labels2020, labels2021, labels2022, labels2023, labels2024)
+
+#Rename columns
+colnames(labels_all)[colnames(labels_all)=='Plot'] <- 'plot'
+colnames(labels_all)[colnames(labels_all)=='Range'] <- 'range'
+colnames(labels_all)[colnames(labels_all)=='Pass'] <- 'column'
+colnames(labels_all)[colnames(labels_all)=='Anthesis [days]'] <- 'anthesis_days'
+colnames(labels_all)[colnames(labels_all)=='Silking [days]'] <- 'silking_days'
+colnames(labels_all)[colnames(labels_all)=='Plant Height [cm]'] <- 'plant_height'
+colnames(labels_all)[colnames(labels_all)=='Ear Height [cm]'] <- 'ear_height'
+colnames(labels_all)[colnames(labels_all)=='Stand Count [# of plants]'] <- 'stand_count'
+colnames(labels_all)[colnames(labels_all)=='Root Lodging [# of plants]'] <- 'root_lodging'
+colnames(labels_all)[colnames(labels_all)=='Stalk Lodging [# of plants]'] <- 'stalk_lodging'
+colnames(labels_all)[colnames(labels_all)=='Grain Moisture [%]'] <- 'grain_moisture'
+colnames(labels_all)[colnames(labels_all)=='Test Weight [lbs]'] <- 'test_weight'
+colnames(labels_all)[colnames(labels_all)=='Plot Weight [lbs]'] <- 'plot_weight'
+colnames(labels_all)[colnames(labels_all)=='Grain Yield (bu/A)'] <- 'grain_yield'
+colnames(labels_all)[colnames(labels_all)=='Year'] <- 'year'
+colnames(labels_all)[colnames(labels_all)=='Field-Location'] <- 'field'
+labels_all <- as.data.frame(labels_all)
+labels_all$plot <- as.integer(labels_all$plot)
+labels_all$column <- as.integer(labels_all$column)
+
+#Add ASI
+labels_all$ASI <- labels_all$silking_days - labels_all$anthesis_days
+
+#Add uniqueID
+labels_all <- labels_all %>% unite("uniqueID", c("field", "year", "plot"), sep = "_", remove = FALSE, na.rm = FALSE)
+```
+
+
+#Remove outliers and discarded plots by environment
+```{r}
+phenos <- c("grain_yield", "anthesis_days", "silking_days", "plant_height", "ear_height", "stand_count", "root_lodging", "stalk_lodging", "grain_moisture", "plot_weight", "test_weight", "ASI")
+for(pheno in phenos){
+  print(pheno)
+  for(year in 2020:2023){
+    print(year)
+    mean = mean(labels_all[labels_all$year == year, pheno], na.rm = TRUE)
+    sd = sd(labels_all[labels_all$year == year, pheno], na.rm = TRUE)
+    thresh_max = mean + (3*sd)
+    thresh_min = mean - (3*sd)
+    for(i in 1:nrow(labels_all)){
+      if((labels_all[i, "year"] == year) & (is.na(labels_all[i, pheno]) == FALSE)){
+        if(labels_all[i, pheno] > thresh_max || labels_all[i, pheno] < thresh_min){
+          print(labels_all[i, 'plot'])
+          labels_all[i, pheno] = NA
+        }
+        if(is.na(labels_all$`Plot Discarded [enter 'yes' or blank]`[i]) == FALSE){
+          print(labels_all[i, 'plot'])
+          labels_all[i, pheno] = NA
+        }
+      }
+    }
+  }
+  for(year in c(2024)){
+    print(year)
+    for(field in c('NYH2', 'NYH3')){
+      print(field)
+      mean = mean(labels_all[labels_all$year == year & labels_all$field == field, pheno], na.rm = TRUE)
+      sd = sd(labels_all[labels_all$year == year & labels_all$field == field, pheno], na.rm = TRUE)
+      thresh_max = mean + (3*sd)
+      thresh_min = mean - (3*sd)
+      for(i in 1:nrow(labels_all)){
+        if((labels_all[i, "year"] == year) & (labels_all[i, "field"] == field) & (is.na(labels_all[i, pheno]) == FALSE)){
+          if(labels_all[i, pheno] > thresh_max || labels_all[i, pheno] < thresh_min){
+            print(labels_all[i, 'plot'])
+            labels_all[i, pheno] = NA
+          }
+          if(is.na(labels_all$`Plot Discarded [enter 'yes' or blank]`[i]) == FALSE){
+            print(labels_all[i, 'plot'])
+            labels_all[i, pheno] = NA
+          }
+        }
+      }
+    }
+  }
+}
+
+#Reflect changes in df_lidar and df_msi
+df_lidar <- df_lidar %>%
+  left_join(labels_all %>% select(uniqueID, all_of(phenos)), by = "uniqueID", suffix = c("", ".df1"))
+for(pheno in phenos){
+  df_lidar[[pheno]] <- ifelse(is.na(df_lidar[[paste0(pheno, ".df1")]]), NA, df_lidar[[pheno]])
+}
+df_lidar <- df_lidar %>%
+  select(-ends_with(".df1"))
+
+df_msi <- df_msi %>%
+  left_join(labels_all %>% select(uniqueID, all_of(phenos)), by = "uniqueID", suffix = c("", ".df1"))
+for(pheno in phenos){
+  df_msi[[pheno]] <- ifelse(is.na(df_msi[[paste0(pheno, ".df1")]]), NA, df_msi[[pheno]])
+}
+df_msi <- df_msi %>%
+  select(-ends_with(".df1"))
+```
+
+
+#Create timeseries matrices
+```{r}
+#Get MSI latent codes for each GDD as new variable
+msi_timeseries <- df_msi %>%
+  pivot_wider(
+    names_from = GDD_equiv,   # The 'date' values become column names
+    values_from = paste0("V", 1:lsp_size)   # The LSP values populate the new columns
+  )
+msi_timeseries <- cbind(msi_timeseries[,'uniqueID'], msi_timeseries[,setdiff(colnames(msi_timeseries), colnames(df_msi))])
+msi_timeseries <- msi_timeseries %>% group_by_at(vars(uniqueID)) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+msi_timeseries <- as.matrix(msi_timeseries)
+rownames(msi_timeseries) <- msi_timeseries[,'uniqueID']
+msi_timeseries <- msi_timeseries[,2:ncol(msi_timeseries)]
+#Center and scale
+storage.mode(msi_timeseries) <- "numeric"
+msi_timeseries_scaled_by_lf <- scale(msi_timeseries, center = TRUE, scale = TRUE)
+
+#Get lidar latent codes for each GDD as new variable
+lidar_timeseries <- df_lidar %>%
+  pivot_wider(
+    names_from = GDD_equiv,   # The 'date' values become column names
+    values_from = paste0("V", 1:lsp_size)   # The LSP values populate the new columns
+  )
+lidar_timeseries <- cbind(lidar_timeseries[,'uniqueID'], lidar_timeseries[,setdiff(colnames(lidar_timeseries), colnames(df_lidar))])
+lidar_timeseries <- lidar_timeseries %>% group_by_at(vars(uniqueID)) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+lidar_timeseries <- as.matrix(lidar_timeseries)
+rownames(lidar_timeseries) <- lidar_timeseries[,'uniqueID']
+lidar_timeseries <- lidar_timeseries[,2:ncol(lidar_timeseries)]
+# impute missing data by GDD_equiv & year
+year_from_row <- function(x) sub("^[^_]+_([0-9]{4})_.*$", "\\1", x)  # keep year
+rn <- rownames(lidar_timeseries) # get rownames
+year <- vapply(rn, year_from_row, character(1)) # get row indices of each year
+groups_year <- split(seq_along(rn), year) # group row indices by year label
+# for each year and each GDD_equiv, replace NA with the mean of that group
+for(i in colnames(lidar_timeseries)){
+  for(g in groups_year){
+    vals <- as.numeric(lidar_timeseries[g, i])
+    m <- mean(vals, na.rm = TRUE)
+    if(is.finite(m)){
+      nas <- is.na(vals)
+      if(any(nas)) lidar_timeseries[g, i][nas] <- m
+    }
+  }
+}
+#Center and scale
+storage.mode(lidar_timeseries) <- "numeric"
+lidar_timeseries_scaled_by_lf <- scale(lidar_timeseries, center = TRUE, scale = TRUE)
+lidar_timeseries_scaled_by_lf <- lidar_timeseries_scaled_by_lf[,colSums(is.na(lidar_timeseries_scaled_by_lf))==0]
+```
+
+
+#Get timeseries dataframes
+```{r}
+#Get msi dataframe
+msi_timeseries_scaled_by_lf_df <- msi_timeseries_scaled_by_lf %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("uniqueID")
+
+phenos <- c("grain_yield", "anthesis_days", "silking_days", "plant_height", "ear_height", "stand_count", "root_lodging", "stalk_lodging", "grain_moisture", "plot_weight", "test_weight", "ASI")
+df_msi_z <- msi_timeseries_scaled_by_lf_df %>%
+                left_join(df_msi[, !names(df_msi) %in% paste0("V", 1:512)], by = "uniqueID") %>%
+                group_by(uniqueID) %>%
+                summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+
+#Get lidar dataframe
+lidar_timeseries_scaled_by_lf_df <- lidar_timeseries_scaled_by_lf %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("uniqueID")
+
+phenos <- c("grain_yield", "anthesis_days", "silking_days", "plant_height", "ear_height", "stand_count", "root_lodging", "stalk_lodging", "grain_moisture", "plot_weight", "test_weight", "ASI")
+df_lidar_z <- lidar_timeseries_scaled_by_lf_df %>%
+                left_join(df_lidar[, !names(df_lidar) %in% paste0("V", 1:512)], by = "uniqueID") %>%
+                group_by(uniqueID) %>%
+                summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+```
+
+
+#Calculate repeatability
+```{r}
+#Remove 2024, as needed
+labels_sub <- labels_all
+if(cv != "Test"){
+  labels_sub <- labels_sub[!(labels_sub$year == 2024),]
+}
+
+#Add any missing plots as NA
+labels_to_add <- labels_sub[!(labels_sub$uniqueID %in% unique(df_msi_z$uniqueID)),]
+df_msi_z <- bind_rows(df_msi_z, labels_to_add)
+#Remove columns 3 & 4 for 2021
+df_msi_z <- df_msi_z[!(df_msi_z$year == 2021 & df_msi_z$column == 3),]
+df_msi_z <- df_msi_z[!(df_msi_z$year == 2021 & df_msi_z$column == 4),]
+#Format variables
+df_msi_z <- df_msi_z %>%
+  mutate(genotype_num = as.numeric(factor(Pedigree))) %>%
+  mutate(genotype_num = as.factor(genotype_num))
+df_msi_z$Replicate <- as.factor(df_msi_z$Replicate)
+df_msi_z$field <- as.factor(df_msi_z$field)
+df_msi_z$Block <- as.factor(df_msi_z$Block)
+df_msi_z$range <- as.factor(df_msi_z$range)
+df_msi_z$column <- as.factor(df_msi_z$column)
+df_msi_z$year <- as.factor(df_msi_z$year)
+df_msi_z <- df_msi_z %>%
+  mutate(env = if_else(year %in% 2020:2023,
+                       as.character(year),
+                       paste0(year, "_", field)))
+
+#Add any missing plots as NA
+labels_to_add <- labels_sub[!(labels_sub$uniqueID %in% unique(df_lidar_z$uniqueID)),]
+df_lidar_z <- bind_rows(df_lidar_z, labels_to_add)
+#Remove columns 3 & 4 for 2021
+df_lidar_z <- df_lidar_z[!(df_lidar_z$year == 2021 & df_lidar_z$column == 3),]
+df_lidar_z <- df_lidar_z[!(df_lidar_z$year == 2021 & df_lidar_z$column == 4),]
+#Format variables
+df_lidar_z <- df_lidar_z %>%
+  mutate(genotype_num = as.numeric(factor(Pedigree))) %>%
+  mutate(genotype_num = as.factor(genotype_num))
+df_lidar_z$Replicate <- as.factor(df_lidar_z$Replicate)
+df_lidar_z$field <- as.factor(df_lidar_z$field)
+df_lidar_z$Block <- as.factor(df_lidar_z$Block)
+df_lidar_z$range <- as.factor(df_lidar_z$range)
+df_lidar_z$column <- as.factor(df_lidar_z$column)
+df_lidar_z$year <- as.factor(df_lidar_z$year)
+df_lidar_z <- df_lidar_z %>%
+  mutate(env = if_else(year %in% 2020:2023,
+                       as.character(year),
+                       paste0(year, "_", field)))
+
+#Find Cullis heritability for all manually measured phenotypes
+h2_cullis_pheno <- data.frame(h2_cullis = numeric(), pheno = character(), env = character())
+phenos <- c("grain_yield", "anthesis_days", "silking_days", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "plot_weight", "ASI")
+for(env in unique(df_msi_z$env)){
+  df_msi_sub <- df_msi_z[df_msi_z$env == env,]
+  df_msi_sub <- df_msi_sub[order(df_msi_sub$range,
+                                  df_msi_sub$column), ]
+  for(pheno in phenos){
+    print(pheno)
+    df_msi_sub$pheno <- df_msi_sub[,pheno]
+    lmm <- asreml(
+      fixed = pheno ~ 1,
+      random = ~ genotype_num + Replicate:field + Block:Replicate:field,
+      residual = ~ ar1v(range):ar1(column),
+      data = df_msi_sub,
+      maxit = 50
+    )
+    # genetic variance component
+    vc <- summary(lmm)$varcomp
+    vc_g <- vc["genotype_num", "component"]
+    vdBLUP.mat <- predict(lmm, classify="genotype_num", only="genotype_num", sed=TRUE)$sed^2
+    vdBLUP.avg <- mean(vdBLUP.mat[upper.tri(vdBLUP.mat, diag=FALSE)]) # take mean of upper triangle
+    H2Cullis <- 1 - (vdBLUP.avg / (2 * vc_g))
+    new_row <- cbind(h2_cullis = H2Cullis, pheno = pheno, env = env)
+    h2_cullis_pheno <- rbind(h2_cullis_pheno, new_row)
+  }
+}
+h2_cullis_pheno$dtype <- "Trait"
+h2_cullis_pheno$h2_cullis <- as.numeric(h2_cullis_pheno$h2_cullis)
+
+write.csv(h2_cullis_pheno, paste0("h2_cullis/dtype_comparisons/", cv, cv_version, "/h2_cullis_pheno_NYH2_NYH3_2021-23_", cv, cv_version, "_equiv.csv"))
+
+#Find Cullis heritability for all MSI latent phenotypes
+h2_cullis_msi <- data.frame(h2_cullis = numeric(), lf = character(), env = character())
+msi_lf_cols <- grep("^V", colnames(df_msi_z), value = TRUE)
+for(env in unique(df_msi_z$env)){
+  df_msi_sub <- df_msi_z[df_msi_z$env == env,]
+  df_msi_sub <- df_msi_sub[order(df_msi_sub$range,
+                                  df_msi_sub$column), ]
+  for(i in msi_lf_cols){
+    print(i)
+    df_msi_sub$lsp <- df_msi_sub[,i]
+    if(var(df_msi_sub$lsp, na.rm = TRUE) == 0){
+      next
+    }
+    lmm <- tryCatch({asreml(
+      fixed = lsp ~ 1,
+      random = ~ genotype_num + Replicate:field + Block:Replicate:field,
+      residual = ~ ar1v(range):ar1(column),
+      data = df_msi_sub,
+      maxit = 50)}, error = function(e) return(NULL))
+    if(is.null(lmm)){
+      warning(paste("Model failed, skipping."))
+      next
+    }
+    # genetic variance component
+    vc <- summary(lmm)$varcomp
+    vc_g <- vc["genotype_num", "component"]
+    vdBLUP.mat <- predict(lmm, classify="genotype_num", only="genotype_num", sed=TRUE)$sed^2
+    vdBLUP.avg <- mean(vdBLUP.mat[upper.tri(vdBLUP.mat, diag=FALSE)]) # take mean of upper triangle
+    H2Cullis <- 1 - (vdBLUP.avg / (2 * vc_g))
+    new_row <- cbind(h2_cullis = H2Cullis, lf = i, env = env)
+    h2_cullis_msi <- rbind(h2_cullis_msi, new_row)
+  }
+}
+h2_cullis_msi$dtype <- "MSI"
+h2_cullis_msi$h2_cullis <- as.numeric(h2_cullis_msi$h2_cullis)
+
+write.csv(h2_cullis_msi, paste0("h2_cullis/dtype_comparisons/", cv, cv_version, "/h2_cullis_msi_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+
+#Find Cullis heritability for all LiDAR latent phenotypes
+h2_cullis_lidar <- data.frame(h2_cullis = numeric(), lf = character(), env = character())
+lidar_lf_cols <- grep("^V", colnames(df_lidar_z), value = TRUE)
+for(env in unique(df_lidar_z$env)){
+  df_lidar_sub <- df_lidar_z[df_lidar_z$env == env,]
+  df_lidar_sub <- df_lidar_sub[order(df_lidar_sub$range,
+                                      df_lidar_sub$column), ]
+  for(i in lidar_lf_cols){
+    print(i)
+    df_lidar_sub$lsp <- df_lidar_sub[,i]
+    if(var(df_lidar_sub$lsp, na.rm = TRUE) == 0){
+      next
+    }
+    lmm <- tryCatch({asreml(
+      fixed = lsp ~ 1,
+      random = ~ genotype_num + Replicate:field + Block:Replicate:field,
+      residual = ~ ar1v(range):ar1(column),
+      data = df_lidar_sub,
+      maxit = 50)}, error = function(e) return(NULL))
+    if(is.null(lmm)){
+      warning(paste("Model failed, skipping."))
+      next
+    }
+    # genetic variance component
+    vc <- summary(lmm)$varcomp
+    vc_g <- vc["genotype_num", "component"]
+    vdBLUP.mat <- predict(lmm, classify="genotype_num", only="genotype_num", sed=TRUE)$sed^2
+    vdBLUP.avg <- mean(vdBLUP.mat[upper.tri(vdBLUP.mat, diag=FALSE)]) # take mean of upper triangle
+    H2Cullis <- 1 - (vdBLUP.avg / (2 * vc_g))
+    new_row <- cbind(h2_cullis = H2Cullis, lf = i, env = env)
+    h2_cullis_lidar <- rbind(h2_cullis_lidar, new_row)
+  }
+}
+h2_cullis_lidar$dtype <- "LiDAR"
+h2_cullis_lidar$h2_cullis <- as.numeric(h2_cullis_lidar$h2_cullis)
+
+write.csv(h2_cullis_lidar, paste0("h2_cullis/dtype_comparisons/", cv, cv_version, "/h2_cullis_lidar_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+```
+
+

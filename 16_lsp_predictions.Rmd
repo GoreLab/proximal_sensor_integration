@@ -1,0 +1,958 @@
+---
+title: "phenotype_predictions"
+output: html_document
+date: "2023-03-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+setwd("/Users/eef52/Documents/Cornell/UAV-UGV/LSP_Analysis")
+```
+
+
+#Load libraries
+```{r}
+library(sommer)
+library(psych)
+library(ggplot2)
+library(stringr)
+library(tidyverse)
+library(caTools)
+require(nnet)
+library(ggfortify)
+library(dplyr)
+library(Metrics)
+library(BGLR)
+library(caret)
+library(Rfast)
+```
+
+
+#Read in data
+```{r}
+cv = 'CV1'
+cv_version = ''
+lsp_size = 512
+equivdates = TRUE
+
+df_lidar <- read.csv(paste0("LSP_files/CV_Experiments/", cv, "_labels_equiv/labels_z_lidar_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+df_msi <- read.csv(paste0("LSP_files/CV_Experiments/", cv, "_labels_equiv/labels_z_msi_NYH2_NYH3_2020-24_", cv, cv_version, "_", lsp_size, "_equiv.csv"))
+df_VIs <- read.csv("VI_labels/labels_VI_NYH2_NYH3_2020-24.csv")
+df_lidar <- df_lidar[,-c(1)]
+df_msi <- df_msi[,-c(1)]
+df_VIs <- df_VIs[,-c(1)]
+
+#If CVBP or CV1, keep only data in validation set for autoencoder model
+if(cv == 'CVBP' | cv == 'CV1'){
+  df_lidar <- df_lidar[df_lidar$train_set == "val",]
+  df_msi <- df_msi[df_msi$train_set == "val",]
+}
+
+#Remove test
+df_lidar <- df_lidar[df_lidar$train_set != "test",]
+df_msi <- df_msi[df_msi$train_set != "test",]
+
+#Remove lidar 2020 and NYH3 2021
+df_lidar <- df_lidar[!df_lidar$year == 2020,]
+df_lidar <- df_lidar[!(df_lidar$year == 2021 & df_lidar$field == 'NYH3'),]
+
+#Remove lidar senescence date
+# df_lidar <- df_lidar[df_lidar$GDD_equiv != '2533-2626',]
+
+#Constrain to same set of plots
+df_lidar <- df_lidar[df_lidar$uniqueID %in% unique(df_msi$uniqueID), ]
+df_msi <- df_msi[df_msi$uniqueID %in% unique(df_lidar$uniqueID), ]
+
+#Add genotype_num variable (df_msi is more complete than df_lidar; ensure same genotype_num for each pedigree across datasets)
+df_msi <- df_msi %>%
+  mutate(genotype_num = as.numeric(factor(Pedigree))) %>%
+  mutate(genotype_num = as.factor(genotype_num))
+df_lidar <- df_lidar %>%
+  left_join(unique(df_msi[,c("Pedigree", "genotype_num")]), by = c("Pedigree"))
+```
+
+
+#Remove outliers and discarded plots by environment
+```{r}
+#Get G2F information
+labels2020 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2020/a._2020_phenotypic_data/g2f_2020_phenotypic_clean_data.csv")
+labels2021 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2021/a._2021_phenotypic_data/g2f_2021_phenotypic_clean_data.csv")
+labels2022 = read_csv("https://de.cyverse.org/anon-files/iplant/home/shared/commons_repo/curated/GenomesToFields_G2F_data_2022/a._2022_phenotypic_data/g2f_2022_phenotypic_clean_data.csv")
+labels2023 = read.csv("get_labels/G2F_2023/G2F_2023_modified.csv", check.names = FALSE)
+labels2024 = read.csv("get_labels/G2F_2024/G2F_2024_modified.csv", check.names = FALSE)
+
+#Filter to NYH2 & NYH3
+labels2020 <- labels2020[labels2020$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2021 <- labels2021[labels2021$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2022 <- labels2022[labels2022$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2023 <- labels2023[labels2023$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+labels2024 <- labels2024[labels2024$`Field-Location` %in% c('NYH2', 'NYH3'), ]
+
+#Create single df
+labels2020$`Date Plot Planted [MM/DD/YY]` <- as.Date(labels2020$`Date Plot Planted [MM/DD/YY]`[1], '%m/%d/%Y')
+labels2022$Source <- NA
+labels2023 <- labels2023[,-c(1)]
+labels2024 <- labels2024[,-c(1)]
+labels_all <- rbind(labels2020, labels2021, labels2022, labels2023, labels2024)
+
+#Rename columns
+colnames(labels_all)[colnames(labels_all)=='Plot'] <- 'plot'
+colnames(labels_all)[colnames(labels_all)=='Range'] <- 'range'
+colnames(labels_all)[colnames(labels_all)=='Pass'] <- 'column'
+colnames(labels_all)[colnames(labels_all)=='Anthesis [days]'] <- 'anthesis_days'
+colnames(labels_all)[colnames(labels_all)=='Silking [days]'] <- 'silking_days'
+colnames(labels_all)[colnames(labels_all)=='Plant Height [cm]'] <- 'plant_height'
+colnames(labels_all)[colnames(labels_all)=='Ear Height [cm]'] <- 'ear_height'
+colnames(labels_all)[colnames(labels_all)=='Stand Count [# of plants]'] <- 'stand_count'
+colnames(labels_all)[colnames(labels_all)=='Root Lodging [# of plants]'] <- 'root_lodging'
+colnames(labels_all)[colnames(labels_all)=='Stalk Lodging [# of plants]'] <- 'stalk_lodging'
+colnames(labels_all)[colnames(labels_all)=='Grain Moisture [%]'] <- 'grain_moisture'
+colnames(labels_all)[colnames(labels_all)=='Test Weight [lbs]'] <- 'test_weight'
+colnames(labels_all)[colnames(labels_all)=='Plot Weight [lbs]'] <- 'plot_weight'
+colnames(labels_all)[colnames(labels_all)=='Grain Yield (bu/A)'] <- 'grain_yield'
+colnames(labels_all)[colnames(labels_all)=='Year'] <- 'year'
+colnames(labels_all)[colnames(labels_all)=='Field-Location'] <- 'field'
+labels_all <- as.data.frame(labels_all)
+labels_all$plot <- as.integer(labels_all$plot)
+labels_all$column <- as.integer(labels_all$column)
+
+#Add ASI
+labels_all$ASI <- labels_all$silking_days - labels_all$anthesis_days
+
+#Add uniqueID
+labels_all <- labels_all %>% unite("uniqueID", c("field", "year", "plot"), sep = "_", remove = FALSE, na.rm = FALSE)
+
+phenos <- c("grain_yield", "anthesis_days", "silking_days", "plant_height", "ear_height", "stand_count", "root_lodging", "stalk_lodging", "grain_moisture", "plot_weight", "test_weight", "ASI")
+for(pheno in phenos){
+  print(pheno)
+  for(year in 2020:2023){
+    print(year)
+    mean = mean(labels_all[labels_all$year == year, pheno], na.rm = TRUE)
+    sd = sd(labels_all[labels_all$year == year, pheno], na.rm = TRUE)
+    thresh_max = mean + (3*sd)
+    thresh_min = mean - (3*sd)
+    for(i in 1:nrow(labels_all)){
+      if((labels_all[i, "year"] == year) & (is.na(labels_all[i, pheno]) == FALSE)){
+        if(labels_all[i, pheno] > thresh_max || labels_all[i, pheno] < thresh_min){
+          print(labels_all[i, 'plot'])
+          labels_all[i, pheno] = NA
+        }
+        if(is.na(labels_all$`Plot Discarded [enter 'yes' or blank]`[i]) == FALSE){
+          print(labels_all[i, 'plot'])
+          labels_all[i, pheno] = NA
+        }
+      }
+    }
+  }
+  #remove outliers by field for 2024
+  for(year in c(2024)){
+    print(year)
+    for(field in c('NYH2', 'NYH3')){
+      print(field)
+      mean = mean(labels_all[labels_all$year == year & labels_all$field == field, pheno], na.rm = TRUE)
+      sd = sd(labels_all[labels_all$year == year & labels_all$field == field, pheno], na.rm = TRUE)
+      thresh_max = mean + (3*sd)
+      thresh_min = mean - (3*sd)
+      for(i in 1:nrow(labels_all)){
+        if((labels_all[i, "year"] == year) & (labels_all[i, "field"] == field) & (is.na(labels_all[i, pheno]) == FALSE)){
+          if(labels_all[i, pheno] > thresh_max || labels_all[i, pheno] < thresh_min){
+            print(labels_all[i, 'plot'])
+            labels_all[i, pheno] = NA
+          }
+          if(is.na(labels_all$`Plot Discarded [enter 'yes' or blank]`[i]) == FALSE){
+            print(labels_all[i, 'plot'])
+            labels_all[i, pheno] = NA
+          }
+        }
+      }
+    }
+  }
+}
+
+#Reflect changes in df_lidar and df_msi
+df_lidar <- df_lidar %>%
+  left_join(labels_all %>% select(uniqueID, all_of(phenos)), by = "uniqueID", suffix = c("", ".df1"))
+for(pheno in phenos){
+  df_lidar[[pheno]] <- ifelse(is.na(df_lidar[[paste0(pheno, ".df1")]]), NA, df_lidar[[pheno]])
+}
+df_lidar <- df_lidar %>%
+  select(-ends_with(".df1"))
+
+df_msi <- df_msi %>%
+  left_join(labels_all %>% select(uniqueID, all_of(phenos)), by = "uniqueID", suffix = c("", ".df1"))
+for(pheno in phenos){
+  df_msi[[pheno]] <- ifelse(is.na(df_msi[[paste0(pheno, ".df1")]]), NA, df_msi[[pheno]])
+}
+df_msi <- df_msi %>%
+  select(-ends_with(".df1"))
+```
+
+
+#Create timeseries matrices
+```{r}
+#Get VIs for each GDD as new variable
+VIs <- colnames(df_VIs %>% select(-"file_name"))
+vi_timeseries <- df_msi %>%
+  pivot_wider(
+    names_from = GDD_equiv,   # The GDD values become column names
+    values_from = VIs   # The VI values populate the new columns
+  )
+vi_timeseries <- cbind(vi_timeseries[,'uniqueID'], vi_timeseries[,setdiff(colnames(vi_timeseries), colnames(df_msi))])
+vi_timeseries <- vi_timeseries %>% group_by_at(vars(uniqueID)) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+vi_timeseries <- as.matrix(vi_timeseries)
+rownames(vi_timeseries) <- vi_timeseries[,'uniqueID']
+vi_timeseries <- vi_timeseries[,2:ncol(vi_timeseries)]
+#Center and scale
+storage.mode(vi_timeseries) <- "numeric"
+vi_timeseries_scaled_by_lf <- scale(vi_timeseries, center = TRUE, scale = TRUE)
+
+#Get MSI latent codes for each GDD as new variable
+msi_timeseries <- df_msi %>%
+  pivot_wider(
+    names_from = GDD_equiv,   # The 'date' values become column names
+    values_from = paste0("V", 1:lsp_size)   # The LSP values populate the new columns
+  )
+msi_timeseries <- cbind(msi_timeseries[,'uniqueID'], msi_timeseries[,setdiff(colnames(msi_timeseries), colnames(df_msi))])
+msi_timeseries <- msi_timeseries %>% group_by_at(vars(uniqueID)) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+msi_timeseries <- as.matrix(msi_timeseries)
+rownames(msi_timeseries) <- msi_timeseries[,'uniqueID']
+msi_timeseries <- msi_timeseries[,2:ncol(msi_timeseries)]
+#Center and scale
+storage.mode(msi_timeseries) <- "numeric"
+msi_timeseries_scaled_by_lf <- scale(msi_timeseries, center = TRUE, scale = TRUE)
+
+#Get lidar latent codes for each GDD as new variable
+lidar_timeseries <- df_lidar %>%
+  pivot_wider(
+    names_from = GDD_equiv,   # The 'date' values become column names
+    values_from = paste0("V", 1:lsp_size)   # The LSP values populate the new columns
+  )
+lidar_timeseries <- cbind(lidar_timeseries[,'uniqueID'], lidar_timeseries[,setdiff(colnames(lidar_timeseries), colnames(df_lidar))])
+lidar_timeseries <- lidar_timeseries %>% group_by_at(vars(uniqueID)) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+lidar_timeseries <- as.matrix(lidar_timeseries)
+rownames(lidar_timeseries) <- lidar_timeseries[,'uniqueID']
+lidar_timeseries <- lidar_timeseries[,2:ncol(lidar_timeseries)]
+# impute missing data by GDD_equiv & year
+year_from_row <- function(x) sub("^[^_]+_([0-9]{4})_.*$", "\\1", x)  # keep year
+rn <- rownames(lidar_timeseries) # get rownames
+year <- vapply(rn, year_from_row, character(1)) # get row indices of each year
+groups_year <- split(seq_along(rn), year) # group row indices by year label
+# for each year and each GDD_equiv, replace NA with the mean of that group
+for(i in colnames(lidar_timeseries)){
+  for(g in groups_year){
+    vals <- as.numeric(lidar_timeseries[g, i])
+    m <- mean(vals, na.rm = TRUE)
+    if(is.finite(m)){
+      nas <- is.na(vals)
+      if(any(nas)) lidar_timeseries[g, i][nas] <- m
+    }
+  }
+}
+#Center and scale
+storage.mode(lidar_timeseries) <- "numeric"
+lidar_timeseries_scaled_by_lf <- scale(lidar_timeseries, center = TRUE, scale = TRUE)
+lidar_timeseries_scaled_by_lf <- lidar_timeseries_scaled_by_lf[, colSums(is.na(lidar_timeseries_scaled_by_lf)) == 0]
+
+#Get integrated latent codes for all dates
+integrated_timeseries <- merge(msi_timeseries, lidar_timeseries, 
+                          by = 'row.names', all = FALSE)
+rownames(integrated_timeseries) <- integrated_timeseries[,'Row.names']
+integrated_timeseries <- as.matrix(integrated_timeseries[,2:ncol(integrated_timeseries)])
+#Center and scale
+storage.mode(integrated_timeseries) <- "numeric"
+integrated_timeseries_scaled_by_lf <- scale(integrated_timeseries, center = TRUE, scale = TRUE)
+```
+
+
+#Early season predictions
+```{r}
+#Early season predictions
+#remove final lidar window
+integrated_timeseries_scaled_by_lf <- integrated_timeseries_scaled_by_lf[,!grepl("2533-2626", colnames(integrated_timeseries_scaled_by_lf))]
+lidar_timeseries_scaled_by_lf <- lidar_timeseries_scaled_by_lf[,!grepl("2533-2626", colnames(lidar_timeseries_scaled_by_lf))]
+#remove next msi window
+integrated_timeseries_scaled_by_lf <- integrated_timeseries_scaled_by_lf[,!grepl("2288-2477", colnames(integrated_timeseries_scaled_by_lf))]
+msi_timeseries_scaled_by_lf <- msi_timeseries_scaled_by_lf[,!grepl("2288-2477", colnames(msi_timeseries_scaled_by_lf))]
+vi_timeseries_scaled_by_lf <- vi_timeseries_scaled_by_lf[,!grepl("2288-2477", colnames(vi_timeseries_scaled_by_lf))]
+#remove next msi window
+integrated_timeseries_scaled_by_lf <- integrated_timeseries_scaled_by_lf[,!grepl("1943-2035", colnames(integrated_timeseries_scaled_by_lf))]
+msi_timeseries_scaled_by_lf <- msi_timeseries_scaled_by_lf[,!grepl("1943-2035", colnames(msi_timeseries_scaled_by_lf))]
+vi_timeseries_scaled_by_lf <- vi_timeseries_scaled_by_lf[,!grepl("1943-2035", colnames(vi_timeseries_scaled_by_lf))]
+#remove next lidar window
+integrated_timeseries_scaled_by_lf <- integrated_timeseries_scaled_by_lf[,!grepl("1267-1405", colnames(integrated_timeseries_scaled_by_lf))]
+lidar_timeseries_scaled_by_lf <- lidar_timeseries_scaled_by_lf[,!grepl("1267-1405", colnames(lidar_timeseries_scaled_by_lf))]
+#remove next msi window
+integrated_timeseries_scaled_by_lf <- integrated_timeseries_scaled_by_lf[,!grepl("1008-1174", colnames(integrated_timeseries_scaled_by_lf))]
+msi_timeseries_scaled_by_lf <- msi_timeseries_scaled_by_lf[,!grepl("1008-1174", colnames(msi_timeseries_scaled_by_lf))]
+vi_timeseries_scaled_by_lf <- vi_timeseries_scaled_by_lf[,!grepl("1008-1174", colnames(vi_timeseries_scaled_by_lf))]
+```
+
+
+#Model Comparison - Predict Pheno from LSPs using Bayesian Regression - Season-Level CVBP
+```{r}
+run_BGLR <- function(cov_matrix, phenoDat, saveAt){
+  #create folds for 5-fold cross-validation
+  folds <- createFolds(phenoDat$pheno, k = 5)
+  #set up a vector to store predicted values
+  Ypred = rep(0, nrow(phenoDat))
+  #loop for 5 fold cross validation
+  for(i in 1:5){
+    #setting up a vector of phenotypes for each fold
+    Y = as.matrix(phenoDat$pheno)
+    #mask data for prediction
+    Y[folds[[i]]] <- NA
+    #set up ETA list
+    #Model <- list(list(K = cov_matrix, model = "RKHS"))
+    Model <- list(list(X = cov_matrix, model = "BRR"))
+    result <- BGLR(Y, response_type = "gaussian", ETA = Model, nIter = 20000, burnIn = 500, thin = 100, verbose = FALSE, saveAt = paste0(saveAt, "fold", i, "_"))
+    #get pheno estimates from result list
+    Yhat = result$yHat
+    Ypred[folds[[i]]] = Yhat[folds[[i]]]
+  }
+  #get pheno
+  Y = as.matrix(phenoDat$pheno)
+  #get df of pred and actual phenotypes
+  df = data.frame(pred = Ypred, actual = Y, uniqueID = as.matrix(phenoDat$uniqueID))
+  #correlation between pred and actual
+  cor = cor(Ypred, Y, use = 'complete.obs')
+  print(cor)
+  #rmse between pred and actual
+  rmse = sqrt(mean((Y - Ypred)^2))
+  print(rmse)
+  #return correlation and rmse
+  return(c(cor, rmse))
+  #return(df)
+}
+
+#Prediction from VIs
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_VI <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno)]
+  colnames(phenoDat) <- c("uniqueID", "pheno")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarize_each(funs(mean(., na.rm = TRUE)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- vi_timeseries_scaled_by_lf[(rownames(vi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CVBP_dtype_comparisons_df/VI_", pheno, "_", cv, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = NA, EquivDates = equivdates, Pheno = pheno, Predictor = "Vegetation Indices", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_VI <- rbind(pred_results_VI, pred_results)
+  }
+}
+
+write.csv(pred_results_VI, paste0("pred_results/CV_dtype_comparisons_df/pred_VI_", cv, ".csv"))
+
+#Prediction from MSI latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_msi <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno)]
+  colnames(phenoDat) <- c("uniqueID", "pheno")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarize_each(funs(mean(., na.rm = TRUE)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- msi_timeseries_scaled_by_lf[(rownames(msi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CVBP_dtype_comparisons_df/msi_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "MSI Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_msi <- rbind(pred_results_msi, pred_results)
+  }
+}
+
+write.csv(pred_results_msi, paste0("pred_results/CV_dtype_comparisons_df/pred_msi_", cv, "_", lsp_size, ".csv"))
+
+#Prediction from lidar latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_lidar <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_lidar[,c("uniqueID", pheno)]
+  colnames(phenoDat) <- c("uniqueID", "pheno")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarize_each(funs(mean(., na.rm = TRUE)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- lidar_timeseries_scaled_by_lf[(rownames(lidar_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CVBP_dtype_comparisons_df/lidar_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "LiDAR Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_lidar <- rbind(pred_results_lidar, pred_results)
+  }
+}
+
+write.csv(pred_results_lidar, paste0("pred_results/CV_dtype_comparisons_df/pred_lidar_", cv, "_", lsp_size, ".csv"))
+
+#Prediction from integrated latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_int <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno)]
+  colnames(phenoDat) <- c("uniqueID", "pheno")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarize_each(funs(mean(., na.rm = TRUE)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- integrated_timeseries_scaled_by_lf[(rownames(integrated_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CVBP_dtype_comparisons_df/int_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "Integrated Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_int <- rbind(pred_results_int, pred_results)
+  }
+}
+
+write.csv(pred_results_int, paste0("pred_results/CV_dtype_comparisons_df/pred_int_", cv, "_", lsp_size, ".csv"))
+
+pred_results_all <- rbind(pred_results_msi, pred_results_lidar, pred_results_int)
+
+write.csv(pred_results_all, "pred_results/pred_all_", cv, "_", lsp_size, ".csv")
+```
+
+
+#Model Comparison - Predict Pheno from LSPs using Bayesian Regression - Season-Level CV1
+```{r}
+run_BGLR <- function(cov_matrix, phenoDat, saveAt){
+  #create 5 folds on genotypes (not rows)
+  geno_folds <- createFolds(phenoDat$genotype_num, k = 5)
+  #vector to store predicted values for each row
+  Ypred <- rep(0, nrow(phenoDat))
+  #loop for 5 fold cross validation
+  for(i in 1:5){
+    #full phenotype vector
+    Y <- as.matrix(phenoDat$pheno)
+    #mask test rows for prediction
+    Y[geno_folds[[i]]] <- NA
+    #set up ETA list
+    Model <- list(list(X = cov_matrix, model = "BRR"))
+    result <- BGLR(Y, response_type = "gaussian", ETA = Model, nIter = 20000, burnIn = 500, thin = 100, verbose = FALSE, saveAt = paste0(saveAt, "fold", i, "_"))
+    #get pheno estimates from result list
+    Yhat = result$yHat
+    Ypred[geno_folds[[i]]] = Yhat[geno_folds[[i]]]
+  }
+  #get pheno
+  Y = as.matrix(phenoDat$pheno)
+  #get df of pred and actual phenotypes
+  df = data.frame(pred = Ypred, actual = Y, uniqueID = as.matrix(phenoDat$uniqueID))
+  #correlation between pred and actual
+  cor = cor(Ypred, Y, use = 'complete.obs')
+  print(cor)
+  #rmse between pred and actual
+  rmse = sqrt(mean((Y - Ypred)^2))
+  print(rmse)
+  #return correlation and rmse
+  return(c(cor, rmse))
+  #return(df)
+}
+
+#Prediction from VIs
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_VI <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "genotype_num")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "genotype_num")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- vi_timeseries_scaled_by_lf[(rownames(vi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CV1_dtype_comparisons/VI_", pheno, "_", cv, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = NA, EquivDates = equivdates, Pheno = pheno, Predictor = "Vegetation Indices", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_VI <- rbind(pred_results_VI, pred_results)
+  }
+}
+
+write.csv(pred_results_VI, paste0("pred_results/CV_dtype_comparisons/pred_VI_", cv, ".csv"))
+
+#Prediction from MSI latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_msi <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "genotype_num")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "genotype_num")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- msi_timeseries_scaled_by_lf[(rownames(msi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CV1_cv_comparisons/msi_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "MSI Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_msi <- rbind(pred_results_msi, pred_results)
+  }
+}
+
+write.csv(pred_results_msi, paste0("pred_results/CV_comparisons/pred_msi_", cv, "_", lsp_size, ".csv"))
+
+#Prediction from lidar latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_lidar <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_lidar[,c("uniqueID", pheno, "genotype_num")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "genotype_num")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- lidar_timeseries_scaled_by_lf[(rownames(lidar_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CV1_cv_comparisons/lidar_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "LiDAR Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_lidar <- rbind(pred_results_lidar, pred_results)
+  }
+}
+
+write.csv(pred_results_lidar, paste0("pred_results/CV_comparisons/pred_lidar_", cv, "_", lsp_size, ".csv"))
+
+#Prediction from integrated latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_int <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "genotype_num")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "genotype_num")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>% group_by_at(vars(uniqueID)) %>%
+    summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), across(!where(is.numeric), ~first(.x)))
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- integrated_timeseries_scaled_by_lf[(rownames(integrated_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  for(i in 1:10){
+    save_at <- paste0("BGLR_output/CV1_dtype_comparisons/int_", pheno, "_", cv, "_", lsp_size, "_", i, "_")
+    bglr_mod <- run_BGLR(cov_mat, phenoDat, save_at)
+    pred_results <- data.frame(CV = cv, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "Integrated Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+    # pred_results <- bglr_mod
+    # pred_results$pheno <- pheno
+    pred_results_int <- rbind(pred_results_int, pred_results)
+  }
+}
+
+write.csv(pred_results_int, paste0("pred_results/CV_dtype_comparisons/pred_int_", cv, "_", lsp_size, ".csv"))
+
+pred_results_all <- rbind(pred_results_msi, pred_results_lidar, pred_results_int)
+
+write.csv(pred_results_all, "pred_results/pred_all_", cv, "_", lsp_size, ".csv")
+```
+
+
+#Model Comparison - Predict Pheno from LSPs using Bayesian Regression - Season-Level Single train/val Split
+```{r}
+run_BGLR_1fold <- function(cov_matrix, phenoDat, saveAt){
+  #get val uniqueIDs
+  val <- unique(phenoDat$uniqueID[phenoDat$train_set == 'val'])
+  Y <- phenoDat
+  #mask data for prediction
+  Y$pheno[Y$uniqueID %in% val] <- NA
+  Y = as.matrix(Y$pheno)
+  #set up ETA list
+  Model <- list(list(X = cov_matrix, model = "BRR"))
+  result <- BGLR(Y, response_type = "gaussian", ETA = Model, nIter = 40000, burnIn = 500, thin = 200, verbose = FALSE, saveAt = saveAt)
+  #get pheno estimates from result list
+  Yhat = result$yHat
+  #get df of pred and actual phenotypes
+  df = data.frame(pred = Yhat, actual = as.matrix(phenoDat$pheno), uniqueID = as.matrix(phenoDat$uniqueID))
+  #get train uniqueIDs
+  train <- unique(phenoDat$uniqueID[phenoDat$train_set == 'train'])
+  #correlation between training set pred and actual
+  cor_train = cor(df$pred[df$uniqueID %in% train], df$actual[df$uniqueID %in% train])
+  print(paste0("training set accuracy is: ", cor_train))
+  #correlation between validation set pred and actual
+  cor = cor(df$pred[df$uniqueID %in% val], df$actual[df$uniqueID %in% val])
+  print(paste0("validation set accuracy is: ", cor))
+  #rmse between validation set pred and actual
+  rmse = sqrt(mean((df$actual[df$uniqueID %in% val] - df$pred[df$uniqueID %in% val])^2))
+  print(rmse)
+  #return correlation and rmse
+  return(c(cor, rmse))
+  #return(df)
+}
+
+#Prediction from VIs
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_vi <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "train_set")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "train_set")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>%
+    distinct(uniqueID, .keep_all = TRUE)
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- vi_timeseries_scaled_by_lf[(rownames(vi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  sub_2024_NYH2 <- grepl("NYH2_2024", phenoDat$uniqueID)
+  sub_2024_NYH3 <- grepl("NYH3_2024", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  mean_val_2024_NYH2 <- mean(phenoDat$pheno[sub_2024_NYH2], na.rm = TRUE)
+  mean_val_2024_NYH3 <- mean(phenoDat$pheno[sub_2024_NYH3], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  phenoDat$pheno[sub_2024_NYH2] <- phenoDat$pheno[sub_2024_NYH2] - mean_val_2024_NYH2
+  phenoDat$pheno[sub_2024_NYH3] <- phenoDat$pheno[sub_2024_NYH3] - mean_val_2024_NYH3
+  save_at <- paste0("BGLR_output/Test_dtype_comparisons/VI_", pheno, "_", cv, cv_version, "_")
+  bglr_mod <- run_BGLR_1fold(cov_mat, phenoDat, save_at)
+  pred_results <- data.frame(CV = cv, Version = cv_version, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "Vegetation Indices", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+  # pred_results <- bglr_mod
+  # pred_results$pheno <- pheno
+  pred_results_vi <- rbind(pred_results_vi, pred_results)
+}
+
+write.csv(pred_results_vi, paste0("pred_results/CV_dtype_comparisons/pred_VI_", cv, cv_version, ".csv"))
+
+#Prediction from MSI latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_msi <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "train_set")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "train_set")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>%
+    distinct(uniqueID, .keep_all = TRUE)
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- msi_timeseries_scaled_by_lf[(rownames(msi_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  sub_2024_NYH2 <- grepl("NYH2_2024", phenoDat$uniqueID)
+  sub_2024_NYH3 <- grepl("NYH3_2024", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  mean_val_2024_NYH2 <- mean(phenoDat$pheno[sub_2024_NYH2], na.rm = TRUE)
+  mean_val_2024_NYH3 <- mean(phenoDat$pheno[sub_2024_NYH3], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  phenoDat$pheno[sub_2024_NYH2] <- phenoDat$pheno[sub_2024_NYH2] - mean_val_2024_NYH2
+  phenoDat$pheno[sub_2024_NYH3] <- phenoDat$pheno[sub_2024_NYH3] - mean_val_2024_NYH3
+  save_at <- paste0("BGLR_output/Test_dtype_comparisons/msi_", pheno, "_", cv, cv_version, "_", lsp_size, "_")
+  bglr_mod <- run_BGLR_1fold(cov_mat, phenoDat, save_at)
+  pred_results <- data.frame(CV = cv, Version = cv_version, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "MSI Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+  # pred_results <- bglr_mod
+  # pred_results$pheno <- pheno
+  pred_results_msi <- rbind(pred_results_msi, pred_results)
+}
+
+write.csv(pred_results_msi, paste0("pred_results/CV_dtype_comparisons/pred_msi_", cv, cv_version, "_", lsp_size, ".csv"))
+
+#Prediction from lidar latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_lidar <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_lidar[,c("uniqueID", pheno, "train_set")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "train_set")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>%
+    distinct(uniqueID, .keep_all = TRUE)
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- lidar_timeseries_scaled_by_lf[(rownames(lidar_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  sub_2024_NYH2 <- grepl("NYH2_2024", phenoDat$uniqueID)
+  sub_2024_NYH3 <- grepl("NYH3_2024", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  mean_val_2024_NYH2 <- mean(phenoDat$pheno[sub_2024_NYH2], na.rm = TRUE)
+  mean_val_2024_NYH3 <- mean(phenoDat$pheno[sub_2024_NYH3], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  phenoDat$pheno[sub_2024_NYH2] <- phenoDat$pheno[sub_2024_NYH2] - mean_val_2024_NYH2
+  phenoDat$pheno[sub_2024_NYH3] <- phenoDat$pheno[sub_2024_NYH3] - mean_val_2024_NYH3
+  save_at <- paste0("BGLR_output/Test_dtype_comparisons/lidar_", pheno, "_", cv, cv_version, "_", lsp_size, "_")
+  bglr_mod <- run_BGLR_1fold(cov_mat, phenoDat, save_at)
+  pred_results <- data.frame(CV = cv, Version = cv_version, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "LiDAR Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+  # pred_results <- bglr_mod
+  # pred_results$pheno <- pheno
+  pred_results_lidar <- rbind(pred_results_lidar, pred_results)
+}
+
+write.csv(pred_results_lidar, paste0("pred_results/CV_dtype_comparisons/pred_lidar_", cv, cv_version, "_", lsp_size, ".csv"))
+
+#Prediction from integrated latent codes
+phenos_list <- c("silking_days", "anthesis_days", "grain_yield", "plant_height", "ear_height", "stand_count", "stalk_lodging", "grain_moisture", "ASI")
+pred_results_int <- c()
+for(pheno in phenos_list){
+  set.seed(10)
+  print(pheno)
+  #get phenotype
+  phenoDat <- df_msi[,c("uniqueID", pheno, "train_set")]
+  colnames(phenoDat) <- c("uniqueID", "pheno", "train_set")
+  #remove NAs from phenoDat
+  phenoDat <- phenoDat[!is.na(phenoDat$pheno),]
+  #get phenotype for each uniqueID
+  phenoDat <- phenoDat %>%
+    distinct(uniqueID, .keep_all = TRUE)
+  #remove uniqueIDs where pheno is NA from cov mat
+  cov_mat <- integrated_timeseries_scaled_by_lf[(rownames(integrated_timeseries_scaled_by_lf) %in% phenoDat$uniqueID), ]
+  #sort pheno by uniqueID of cov mat & remove uniqueIDs not in cov mat
+  rownames(phenoDat) <- phenoDat$uniqueID
+  phenoDat <- phenoDat[rownames(cov_mat), ]
+  #mean center phenotype by year
+  sub_2020 <- grepl("2020", phenoDat$uniqueID)
+  sub_2021 <- grepl("2021", phenoDat$uniqueID)
+  sub_2022 <- grepl("2022", phenoDat$uniqueID)
+  sub_2023 <- grepl("2023", phenoDat$uniqueID)
+  sub_2024_NYH2 <- grepl("NYH2_2024", phenoDat$uniqueID)
+  sub_2024_NYH3 <- grepl("NYH3_2024", phenoDat$uniqueID)
+  mean_val_2020 <- mean(phenoDat$pheno[sub_2020], na.rm = TRUE)
+  mean_val_2021 <- mean(phenoDat$pheno[sub_2021], na.rm = TRUE)
+  mean_val_2022 <- mean(phenoDat$pheno[sub_2022], na.rm = TRUE)
+  mean_val_2023 <- mean(phenoDat$pheno[sub_2023], na.rm = TRUE)
+  mean_val_2024_NYH2 <- mean(phenoDat$pheno[sub_2024_NYH2], na.rm = TRUE)
+  mean_val_2024_NYH3 <- mean(phenoDat$pheno[sub_2024_NYH3], na.rm = TRUE)
+  phenoDat$pheno[sub_2020] <- phenoDat$pheno[sub_2020] - mean_val_2020
+  phenoDat$pheno[sub_2021] <- phenoDat$pheno[sub_2021] - mean_val_2021
+  phenoDat$pheno[sub_2022] <- phenoDat$pheno[sub_2022] - mean_val_2022
+  phenoDat$pheno[sub_2023] <- phenoDat$pheno[sub_2023] - mean_val_2023
+  phenoDat$pheno[sub_2024_NYH2] <- phenoDat$pheno[sub_2024_NYH2] - mean_val_2024_NYH2
+  phenoDat$pheno[sub_2024_NYH3] <- phenoDat$pheno[sub_2024_NYH3] - mean_val_2024_NYH3
+  save_at <- paste0("BGLR_output/Test_dtype_comparisons/int_", pheno, "_", cv, cv_version, "_", lsp_size, "_")
+  bglr_mod <- run_BGLR_1fold(cov_mat, phenoDat, save_at)
+  pred_results <- data.frame(CV = cv, Version = cv_version, LatentDimSize = lsp_size, EquivDates = equivdates, Pheno = pheno, Predictor = "Integrated Latent Phenotypes", Correlation = bglr_mod[1], RMSE = bglr_mod[2])
+  # pred_results <- bglr_mod
+  # pred_results$pheno <- pheno
+  pred_results_int <- rbind(pred_results_int, pred_results)
+}
+
+write.csv(pred_results_int, paste0("pred_results/CV_dtype_comparisons/pred_int_", cv, cv_version, "_", lsp_size, ".csv"))
+```
+
+
