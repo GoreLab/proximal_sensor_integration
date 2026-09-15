@@ -1,0 +1,16 @@
+AE_model_params:
+  config_path: 'logs/ResnetAEVarLS/lidar_Test/hparams.yaml'
+  checkpoint_path: 'logs/ResnetAEVarLS/lidar_Test/checkpoints/last.ckpt'
+
+
+AE_data_params:
+  labels_path: '/share/data_share/UGV_lidar_data/CV_Experiments/lidar_labels_NYH2_NYH3_2020-24_Test.csv'
+  file_name_column: 'file_name'
+  data_path: '/share/data_share/UGV_lidar_data/CV_Experiments/lidar_NYH2_NYH3_2020-24_model_data'
+  data_type: 'lidar'
+  in_channels: 1
+  in_height: 672
+  in_width: 160
+  out_channels: 512
+  out_height: 21
+  out_width: 5

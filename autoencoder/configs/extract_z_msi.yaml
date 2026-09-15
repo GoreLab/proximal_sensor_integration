@@ -1,0 +1,18 @@
+AE_model_params:
+  config_path: 'logs/ResnetAEVarLS/msi_Test/hparams.yaml'
+  checkpoint_path: 'logs/ResnetAEVarLS/msi_Test/checkpoints/last.ckpt'
+
+
+AE_data_params:
+  labels_path: '/share/data_share/UAV_MSI_data/CV_Experiments/msi_labels_NYH2_NYH3_2020-24_Test.csv'
+  file_name_column: 'file_name'
+  data_path: '/share/data_share/UAV_MSI_data/CV_Experiments/MSI_NYH2_NYH3_2020-24_clipped_fillmean'
+  data_type: 'msi'
+  in_channels: 5
+  in_height: 384
+  in_width: 96
+  out_channels: 512
+  out_height: 12
+  out_width: 3
+
+

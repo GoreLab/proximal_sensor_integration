@@ -1,0 +1,31 @@
+model_params:
+  name: 'ResnetAEVarLS'
+  in_channels: 5
+  model_name: "resnet18"
+  num_latent_dims: 512
+
+
+data_params:
+  data_path: "/share/data_share/UAV_MSI_data/CV_Experiments/MSI_NYH2_NYH3_2020-24_clipped_fillmean"
+  annotations_file: "/share/data_share/UAV_MSI_data/CV_Experiments/msi_labels_NYH2_NYH3_2020-24_Test.csv"
+  data_type: "msi"
+  train_batch_size: 8
+  val_batch_size: 8
+  patch_size: 64
+  num_workers: 16
+
+
+exp_params:
+  LR: 0.00001
+  weight_decay: 0.0
+  scheduler_gamma: 0.95
+  kld_weight: 0.0
+  manual_seed: 1265
+
+trainer_params:
+  gpus: [0]
+  max_epochs: 150
+
+logging_params:
+  save_dir: "logs/"
+  name: "ResnetAEVarLS"
