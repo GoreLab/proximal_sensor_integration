@@ -1,8 +1,8 @@
 # proximal_sensor_integration
 
-The code presented here will process, curate, and quality check the aerial multispectral images (MSIs) and ground-based LiDAR scans used for all model implementations. These data include over 50,000 plot-level MSIs and over 30,000 plot-level LiDAR scans collected for maize hybrids over 5 growing seasons from 2020 through 2024 at Musgrave Research Farm in Aurora, NY. These data and associated metadata will be available on GigaDB.
+The code presented here will process, curate, and quality check the aerial multispectral images (MSIs) and ground-based LiDAR scans used for all model implementations. These data include over 50,000 plot-level MSIs and over 30,000 plot-level LiDAR scans collected for maize hybrids over 5 growing seasons from 2020 through 2024 at Musgrave Research Farm in Aurora, NY.
 
-We also provide the code needed to train the autoencoder model and extract latent phenotypes, available here for application to the published datasets, as well as new datasets. The autoencoder accepts .png and .tif files, though the dataset.py file may be modified for other image formats, and requires a config file following the below template:
+We also provide the code needed to train the autoencoder model and extract latent phenotypes ("autoencoder/"), available here for application to the published MSI and LiDAR datasets, as well as new datasets. The framework for model training and execution was implemented with Pytorch-VAE, available in GitHub at https://github.com/AntixK/PyTorch-VAE (Subramanian, 2020). The License for this repository is available in its source form, and all utilized scripts have been modified from the source form of the work. We further provide custom model architecture and dataset classes, as well as custom scripts for extracting the latent space. The autoencoder accepts .png and .tif files, though the dataset.py file may be modified for other image formats, and requires a config file following the below template:
 
 ## Autoencoder training config:
 
