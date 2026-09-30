@@ -1,10 +1,20 @@
-# proximal_sensor_integration
+<img width="1065" height="398" alt="image" src="https://github.com/user-attachments/assets/beceec0a-4e9b-4a9b-9aba-0de658b01cbb" />
 
-The code presented here will process, curate, and quality check the aerial multispectral images (MSIs) and ground-based LiDAR scans used for all model implementations. These data include over 50,000 plot-level MSIs and over 30,000 plot-level LiDAR scans collected for maize hybrids over 5 growing seasons from 2020 through 2024 at Musgrave Research Farm in Aurora, NY.
+# Integration of temporal proximal sensing data streams for enhanced prediction of crop traits
 
-We also provide the code needed to train the autoencoder model and extract latent phenotypes ("autoencoder/"), available here for application to the published MSI and LiDAR datasets, as well as new datasets. The framework for model training and execution was implemented with "Pytorch-VAE," available in GitHub (Subramanian, 2020). The License for this repository is available in its source form, and all utilized scripts have been modified from the source form of the work. We further provide custom model architecture and dataset classes, as well as custom scripts for extracting the latent space. The autoencoder accepts .png and .tif files, though the dataset.py file may be modified for other image formats, and requires a config file following the below template:
+## Overview
 
-## Autoencoder training config:
+The code presented here provides an end-to-end pipeline for data preprocessing, feature extraction and integration, trait prediction, and evaluation of results. This includes processing of unoccupied aerial vehicle multispectral images (MSIs) and unoccupied ground vehicle collected LiDAR scans, integration facilitated by using an autoencoder model to extract latent phenotypes, Bayesian regression prediction of 9 agronomically important maize traits, and 4 cross-validation schemes.
+
+In particular, the code will process ("data_preprocessing/"), curate ("data_curation/"), and quality check ("quality_checks/") the aerial MSIs and ground-based LiDAR scans used for all model implementations. These data include over 50,000 plot-level MSIs and over 30,000 plot-level LiDAR scans collected approximately weekly over 5 growing seasons from 2020 through 2024 at Musgrave Research Farm in Aurora, NY for maize hybrids grown as part of the Genomes to Fields Initiative.
+
+We also provide the code needed to train the autoencoder model and extract latent phenotypes ("autoencoder/"), available here for application to the published MSI and LiDAR datasets, as well as new datasets. The framework for model training and execution was implemented with "Pytorch-VAE," available in GitHub (Subramanian, 2020). The License for this repository is available in its source form, and all utilized scripts have been modified from the source form of the work. We further provide custom autoencoder model architecture and dataset classes, as well as custom scripts for extracting the latent space. The autoencoder accepts .png and .tif files, though the dataset.py file may be modified for other image formats.
+
+Finally, we also provide the code for predicting crop traits from the latent spaces extracted from each proximal sensing data stream across all time points, as well as their integration ("16_lsp_predictions.Rmd"), and figure generation ("17_figures.Rmd"). The full workflow, ordering of each script, and their corresponding inputs and outputs are presented below, as well as config file templates describing the necessary inputs and hyperparameters for training the autoencoder model and extracting the latent space.
+
+## Autoencoder training config
+
+The autoencoder requires a config file following the below template:
 
 ```yaml
 model_params:
@@ -39,9 +49,9 @@ logging_params:
   name: "ResnetAEVarLS"
 ```
 
-Extracting the latent space from a trained autoencoder model also requires a config file following the below template:
+## Extract latent space config
 
-## Extract latent space config:
+Extracting the latent space from a trained autoencoder model requires a config file following the below template:
 
 ```yaml
 AE_model_params:
@@ -61,9 +71,7 @@ AE_data_params:
   out_width: <width of latent space>
 ```
 
-Finally, we also provide the code for predicting crop traits from the latent spaces extracted from each proximal sensing data stream, as well as their integration, and figure generation. The full workflow, ordering of each script, and their corresponding inputs and outputs are presented below:
-
-## Workflow:
+## Workflow
 
 1.	lidar_preprocess_post2020.py/lidar_preprocess_2020.py
    * Input:
